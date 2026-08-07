@@ -33,6 +33,13 @@ def cancel_kb(job_id: str):
     ]])
 
 
+async def safe_answer(callback: types.CallbackQuery, text: str, **kwargs):
+    try:
+        await callback.answer(text, **kwargs)
+    except Exception:
+        pass
+
+
 def esc(text) -> str:
     return html.escape(str(text))
 
@@ -445,7 +452,7 @@ async def handle_too_large(callback: types.CallbackQuery, error: FileTooLargeErr
 # --- КОЛБЭКИ YOUTUBE ---
 @router.callback_query(lambda c: c.data.startswith("yt_"))
 async def callback_youtube(callback: types.CallbackQuery):
-    await callback.answer("начинаю загрузку...")
+    await safe_answer(callback, "начинаю загрузку...")
 
     data = user_urls.get(callback.from_user.id)
     if not data or data.get("service") != "youtube":
@@ -532,7 +539,7 @@ async def callback_youtube(callback: types.CallbackQuery):
 # --- КОЛБЭКИ TIKTOK ---
 @router.callback_query(lambda c: c.data.startswith("tt_"))
 async def callback_tiktok(callback: types.CallbackQuery):
-    await callback.answer("начинаю загрузку...")
+    await safe_answer(callback, "начинаю загрузку...")
 
     data = user_urls.get(callback.from_user.id)
     if not data or data.get("service") != "tiktok":
@@ -610,7 +617,7 @@ async def callback_tiktok(callback: types.CallbackQuery):
 # --- КОЛБЭКИ INSTAGRAM ---
 @router.callback_query(lambda c: c.data.startswith("ig_"))
 async def callback_instagram(callback: types.CallbackQuery):
-    await callback.answer("начинаю загрузку...")
+    await safe_answer(callback, "начинаю загрузку...")
 
     data = user_urls.get(callback.from_user.id)
     if not data or data.get("service") != "instagram":
@@ -690,7 +697,7 @@ async def callback_instagram(callback: types.CallbackQuery):
 # --- КОЛБЭКИ FACEBOOK ---
 @router.callback_query(lambda c: c.data.startswith("fb_"))
 async def callback_facebook(callback: types.CallbackQuery):
-    await callback.answer("начинаю загрузку...")
+    await safe_answer(callback, "начинаю загрузку...")
 
     data = user_urls.get(callback.from_user.id)
     if not data or data.get("service") != "facebook":
@@ -777,7 +784,7 @@ async def callback_facebook(callback: types.CallbackQuery):
 # --- КОЛБЭКИ SPOTIFY ---
 @router.callback_query(lambda c: c.data.startswith("sp_"))
 async def callback_spotify(callback: types.CallbackQuery):
-    await callback.answer("начинаю загрузку...")
+    await safe_answer(callback, "начинаю загрузку...")
 
     data = user_urls.get(callback.from_user.id)
     if not data or data.get("service") != "spotify":
@@ -826,6 +833,6 @@ async def callback_cancel(callback: types.CallbackQuery):
     job_id = callback.data.split(":", 1)[1]
     found = download_manager.cancel(job_id)
     if found:
-        await callback.answer("отменяю...")
+        await safe_answer(callback, "отменяю...")
     else:
-        await callback.answer("загрузка уже завершена или отменена")
+        await safe_answer(callback, "загрузка уже завершена или отменена")

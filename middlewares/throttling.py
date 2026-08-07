@@ -29,10 +29,13 @@ class ThrottlingMiddleware(BaseMiddleware):
                 }
             last_time = self.user_timestamps.get(user_id, 0)
             if now - last_time < self.limit_seconds:
-                if isinstance(event, CallbackQuery):
-                    await event.answer("подождите пару секунд...", show_alert=True)
-                elif isinstance(event, Message):
-                    await event.answer("пожалуйста, не спамьте. подождите пару секунд.")
+                try:
+                    if isinstance(event, CallbackQuery):
+                        await event.answer("подождите пару секунд...", show_alert=True)
+                    elif isinstance(event, Message):
+                        await event.answer("пожалуйста, не спамьте. подождите пару секунд.")
+                except Exception:
+                    pass
                 return
             self.user_timestamps[user_id] = now
 
