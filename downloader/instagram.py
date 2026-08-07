@@ -1,6 +1,6 @@
 from pathlib import Path
 import yt_dlp
-from downloader.base import BaseDownloader
+from downloader.base import BaseDownloader, FileTooLargeError
 
 class InstagramDownloader(BaseDownloader):
     def __init__(self):
@@ -35,44 +35,52 @@ class InstagramDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка получения информации instagram: {str(e)}")
     
-    def download_video(self, url: str) -> str:
+    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None) -> str:
         try:
             opts = self.ydl_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
             opts['format'] = 'best[ext=mp4]/best'
-            
+            if progress_hook:
+                opts['progress_hooks'] = [progress_hook]
+
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = ydl.extract_info(url, download=False)
+                estimated = self._estimate_size(info)
+                if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
+                    raise FileTooLargeError(
+                        f"файл слишком большой: ~{estimated / 1048576:.1f} мб > лимита {max_size_mb} мб"
+                    )
+                ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
                 return self.safe_find_file(filename, Path(filename).stem)
+        except FileTooLargeError:
+            raise
         except Exception as e:
             raise Exception(f"ошибка скачивания instagram: {str(e)}")
-    
-    def download_photo(self, url: str) -> str:
+
+    def download_photo(self, url: str, max_size_mb: int = None, progress_hook=None):
         try:
             opts = self.ydl_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
             opts['format'] = 'best[ext=jpg]/best[ext=png]/best'
-            
+            if progress_hook:
+                opts['progress_hooks'] = [progress_hook]
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+                entries = info.get('entries')
+                if entries:
+                    filenames = []
+                    for entry in entries:
+                        filename = ydl.prepare_filename(entry)
+                        path = self.safe_find_file(filename, Path(filename).stem)
+                        if Path(path).exists():
+                            filenames.append(path)
+                    if filenames:
+                        return filenames
                 filename = ydl.prepare_filename(info)
                 return self.safe_find_file(filename, Path(filename).stem)
+        except FileTooLargeError:
+            raise
         except Exception as e:
             raise Exception(f"ошибка скачивания фото instagram: {str(e)}")
-    
-    def download_audio(self, url: str, format: str = "mp3") -> str:
-        try:
-            opts = self.ydl_opts.copy()
-            opts['format'] = 'bestaudio/best'
-            opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': format,
-                'preferredquality': '192',
-            }]
-            
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                base = Path(filename).stem
-                return str(Path(self.download_path) / f"{base}.{format}")
-        except Exception as e:
-            raise Exception(f"ошибка скачивания аудио instagram: {str(e)}")

@@ -22,6 +22,11 @@ class ThrottlingMiddleware(BaseMiddleware):
 
         if user_id:
             now = time.time()
+            if len(self.user_timestamps) > 1000:
+                cutoff = now - 3600
+                self.user_timestamps = {
+                    uid: ts for uid, ts in self.user_timestamps.items() if ts > cutoff
+                }
             last_time = self.user_timestamps.get(user_id, 0)
             if now - last_time < self.limit_seconds:
                 if isinstance(event, CallbackQuery):

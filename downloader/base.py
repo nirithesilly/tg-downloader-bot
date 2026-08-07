@@ -1,9 +1,15 @@
 import os
+import uuid
 import urllib.request
 import urllib.parse
 from pathlib import Path
 import yt_dlp
 from config import DOWNLOAD_PATH
+
+
+class FileTooLargeError(Exception):
+    pass
+
 
 class BaseDownloader:
     def __init__(self):
@@ -16,8 +22,38 @@ class BaseDownloader:
             'retries': 10,
             'fragment_retries': 10,
             'skip_unavailable_fragments': True,
-            'outtmpl': f'{self.download_path}/%(title).50s_%(id)s.%(ext)s',
         }
+
+    def make_outtmpl(self) -> str:
+        return f'{self.download_path}/%(title).50s_%(id)s_{uuid.uuid4().hex[:8]}.%(ext)s'
+
+    def _estimate_size(self, info: dict, max_height: int = None):
+        formats = info.get('formats') or []
+        if not formats:
+            return info.get('filesize') or info.get('filesize_approx') or None
+
+        def size(f):
+            return f.get('filesize') or f.get('filesize_approx') or 0
+
+        candidates = formats
+        videos = [f for f in formats if (f.get('vcodec') or 'none') != 'none']
+        audios = [f for f in formats if (f.get('vcodec') in (None, 'none')) and (f.get('acodec') or 'none') != 'none']
+
+        if max_height:
+            videos = [f for f in videos if (f.get('height') or 0) <= max_height]
+
+        total = 0
+        if videos:
+            total += size(max(videos, key=lambda f: ((f.get('height') or 0), size(f))))
+        if audios:
+            total += size(max(audios, key=lambda f: ((f.get('abr') or 0), size(f))))
+        if total:
+            return total
+
+        for f in candidates:
+            if size(f):
+                return size(f)
+        return None
 
     def resolve_url(self, url: str) -> str:
         try:

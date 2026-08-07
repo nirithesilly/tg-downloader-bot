@@ -1,9 +1,11 @@
 import json
+import shutil
+import uuid
 import urllib.request
 import urllib.parse
 from pathlib import Path
 import yt_dlp
-from downloader.base import BaseDownloader
+from downloader.base import BaseDownloader, FileTooLargeError
 
 class TikTokDownloader(BaseDownloader):
     def _fetch_tikwm_info(self, url: str) -> dict:
@@ -22,13 +24,19 @@ class TikTokDownloader(BaseDownloader):
                 return res_data['data']
         raise Exception(f"tikwm api ответ: {res_data.get('msg', 'ошибка')}")
 
-    def _download_file(self, file_url: str, output_path: Path) -> str:
+    def _download_file(self, file_url: str, output_path: Path, max_size_mb: int = None) -> str:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         req = urllib.request.Request(file_url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp, open(output_path, 'wb') as out_file:
-            out_file.write(resp.read())
+            if max_size_mb:
+                length = resp.headers.get('Content-Length')
+                if length and int(length) > max_size_mb * 1024 * 1024:
+                    raise FileTooLargeError(
+                        f"файл слишком большой: ~{int(length) / 1048576:.1f} мб > лимита {max_size_mb} мб"
+                    )
+            shutil.copyfileobj(resp, out_file)
         return str(output_path)
 
     def get_info(self, url: str) -> dict:
@@ -59,48 +67,70 @@ class TikTokDownloader(BaseDownloader):
             except Exception as ydl_err:
                 raise Exception(f"ошибка получения видео tiktok: {ydl_err}")
 
-    def download_video(self, url: str) -> str:
+    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None) -> str:
         try:
             info = self.get_info(url)
             video_direct_url = info.get('video_url')
             video_id = info.get('id', 'video')
-            
+
             if video_direct_url:
-                file_path = Path(self.download_path) / f"tiktok_{video_id}.mp4"
-                return self._download_file(video_direct_url, file_path)
-            
+                file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
+                return self._download_file(video_direct_url, file_path, max_size_mb)
+
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
             opts['format'] = 'best'
+            if progress_hook:
+                opts['progress_hooks'] = [progress_hook]
             with yt_dlp.YoutubeDL(opts) as ydl:
-                y_info = ydl.extract_info(resolved_url, download=True)
-                filename = ydl.prepare_filename(y_info)
+                info = ydl.extract_info(resolved_url, download=False)
+                estimated = self._estimate_size(info)
+                if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
+                    raise FileTooLargeError(
+                        f"файл слишком большой: ~{estimated / 1048576:.1f} мб > лимита {max_size_mb} мб"
+                    )
+                ydl.process_ie_result(info, download=True)
+                filename = ydl.prepare_filename(info)
                 return self.safe_find_file(filename, Path(filename).stem)
+        except FileTooLargeError:
+            raise
         except Exception as e:
             raise Exception(f"ошибка скачивания tiktok видео: {str(e)}")
 
-    def download_audio(self, url: str, format: str = "mp3") -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None) -> str:
         try:
             info = self.get_info(url)
             audio_direct_url = info.get('audio_url')
             video_id = info.get('id', 'audio')
-            
+
             if audio_direct_url:
-                file_path = Path(self.download_path) / f"tiktok_{video_id}.{format}"
-                return self._download_file(audio_direct_url, file_path)
-            
+                file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.{format}"
+                return self._download_file(audio_direct_url, file_path, max_size_mb)
+
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
             opts['format'] = 'bestaudio/best'
             opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': format,
                 'preferredquality': '192',
             }]
+            if progress_hook:
+                opts['progress_hooks'] = [progress_hook]
             with yt_dlp.YoutubeDL(opts) as ydl:
-                y_info = ydl.extract_info(resolved_url, download=True)
-                filename = ydl.prepare_filename(y_info)
+                info = ydl.extract_info(resolved_url, download=False)
+                estimated = self._estimate_size(info)
+                if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
+                    raise FileTooLargeError(
+                        f"файл слишком большой: ~{estimated / 1048576:.1f} мб > лимита {max_size_mb} мб"
+                    )
+                ydl.process_ie_result(info, download=True)
+                filename = ydl.prepare_filename(info)
                 base = Path(filename).stem
                 return str(Path(self.download_path) / f"{base}.{format}")
+        except FileTooLargeError:
+            raise
         except Exception as e:
             raise Exception(f"ошибка скачивания аудио tiktok: {str(e)}")
