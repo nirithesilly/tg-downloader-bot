@@ -36,7 +36,7 @@ class FacebookDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка facebook: {str(e)}")
 
-    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         resolved = self.resolve_url(url)
         opts = self.default_opts.copy()
         opts['outtmpl'] = self.make_outtmpl()
@@ -73,7 +73,7 @@ class FacebookDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка скачивания facebook: {str(e)}")
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         resolved = self.resolve_url(url)
         opts = self.default_opts.copy()
         opts['outtmpl'] = self.make_outtmpl()

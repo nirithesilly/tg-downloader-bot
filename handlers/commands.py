@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import re
+import time
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
@@ -14,6 +15,7 @@ from downloader.spotify import SpotifyDownloader
 from downloader.base import FileTooLargeError
 from config import MAX_FILE_SIZE_MB
 from utils.files import cleanup_temp_file, get_file_size_mb
+from utils.download_manager import download_manager, DownloadCancelled
 
 router = Router()
 yt_downloader = YouTubeDownloader()
@@ -23,6 +25,12 @@ facebook_downloader = FacebookDownloader()
 spotify_downloader = SpotifyDownloader()
 
 user_urls = {}
+
+
+def cancel_kb(job_id: str):
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="отмена", callback_data=f"cancel:{job_id}")
+    ]])
 
 
 def esc(text) -> str:
@@ -43,19 +51,25 @@ def generic_error(context: str, error: Exception) -> str:
 
 
 async def download_with_progress(message: types.Message, func, *args,
-                                 waiting_text="скачиваю...", **kwargs):
+                                 waiting_text="скачиваю...", token=None, job_id=None, **kwargs):
     status = {'text': ''}
 
     def hook(d):
+        if token and token.cancelled:
+            raise DownloadCancelled()
         if d.get('status') == 'downloading':
             status['text'] = (d.get('_percent_str') or '').strip() or ''
         elif d.get('status') == 'finished':
             status['text'] = 'обрабатываю...'
 
+    kb = cancel_kb(job_id) if job_id else None
     try:
-        await message.edit_text(waiting_text, parse_mode="HTML")
+        await message.edit_text(waiting_text, parse_mode="HTML", reply_markup=kb)
     except Exception:
         pass
+
+    if token:
+        kwargs['cancel_check'] = lambda: token.cancelled
 
     loop = asyncio.get_running_loop()
     task = asyncio.ensure_future(
@@ -63,20 +77,70 @@ async def download_with_progress(message: types.Message, func, *args,
     )
 
     last_text = None
+    grace_start = None
     while not task.done():
         try:
             await asyncio.wait_for(asyncio.shield(task), 1.5)
         except asyncio.TimeoutError:
             pass
+        if token and token.cancelled:
+            if grace_start is None:
+                grace_start = time.monotonic()
+                try:
+                    await message.edit_text("отменяю...", parse_mode="HTML", reply_markup=None)
+                except Exception:
+                    pass
+            elif time.monotonic() - grace_start > 10:
+                raise DownloadCancelled()
+            continue
         text = status['text']
         if text and text != last_text:
             last_text = text
             try:
-                await message.edit_text(f"{waiting_text}\n<b>{esc(text)}</b>", parse_mode="HTML")
+                await message.edit_text(f"{waiting_text}\n<b>{esc(text)}</b>", parse_mode="HTML", reply_markup=kb)
             except Exception:
                 pass
 
     return task.result()
+
+
+async def run_download(callback: types.CallbackQuery, waiting_text: str, func, *args, **kwargs):
+    job = download_manager.create_job(callback.from_user.id)
+    try:
+        async def position_cb(pos):
+            try:
+                await callback.message.edit_text(
+                    f"вы в очереди на загрузку.\n"
+                    f"позиция в очереди: #{pos}\n"
+                    f"сейчас загружается: {download_manager.active_count}/{download_manager.max_concurrent}",
+                    parse_mode="HTML",
+                    reply_markup=cancel_kb(job.job_id)
+                )
+            except Exception:
+                pass
+
+        acquired = await download_manager.wait_for_slot(job, position_cb=position_cb)
+        if not acquired:
+            try:
+                await callback.message.edit_text("загрузка отменена.", parse_mode="HTML")
+            except Exception:
+                pass
+            return None, True
+
+        try:
+            filepath = await download_with_progress(
+                callback.message, func, *args, **kwargs,
+                waiting_text=waiting_text, token=job.token, job_id=job.job_id
+            )
+            return filepath, False
+        except DownloadCancelled:
+            try:
+                await callback.message.edit_text("загрузка отменена.", parse_mode="HTML")
+            except Exception:
+                pass
+            return None, True
+    finally:
+        await download_manager.release_slot(job)
 
 
 # --- КОМАНДА /start ---
@@ -394,10 +458,13 @@ async def callback_youtube(callback: types.CallbackQuery):
 
     if action == "yt_audio":
         try:
-            filepath = await download_with_progress(
-                callback.message, yt_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю аудио (mp3)..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю аудио (mp3)...",
+                yt_downloader.download_audio, url, "mp3",
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -409,7 +476,7 @@ async def callback_youtube(callback: types.CallbackQuery):
             audio = FSInputFile(filepath)
             await callback.message.answer_audio(
                 audio=audio,
-                caption="<b>аудио скачано.</b>",
+                caption="<b>аудио из facebook скачано.</b>",
                 parse_mode="HTML"
             )
             cleanup_temp_file(filepath)
@@ -417,25 +484,28 @@ async def callback_youtube(callback: types.CallbackQuery):
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
-            await callback.message.edit_text(generic_error("youtube", e), parse_mode="HTML")
+            await callback.message.edit_text(generic_error("facebook", e), parse_mode="HTML")
             if 'filepath' in locals():
                 cleanup_temp_file(filepath)
         return
 
-    if action == "yt_video":
+    if action == "fb_video":
         quality, label = "best", "лучшего качества"
-    elif action == "yt_video_720":
+    elif action == "fb_video_720":
         quality, label = "720p", "720p"
-    elif action == "yt_video_480":
+    elif action == "fb_video_480":
         quality, label = "480p", "480p"
     else:
         return
 
     try:
-        filepath = await download_with_progress(
-            callback.message, yt_downloader.download_video, url, quality,
-            max_size_mb=MAX_FILE_SIZE_MB, waiting_text=f"скачиваю видео ({label})..."
+        filepath, cancelled = await run_download(
+            callback, f"скачиваю видео facebook ({label})...",
+            facebook_downloader.download_video, url, quality,
+            max_size_mb=MAX_FILE_SIZE_MB
         )
+        if cancelled:
+            return
         size_mb = get_file_size_mb(filepath)
         if size_mb > MAX_FILE_SIZE_MB:
             await callback.message.edit_text(
@@ -475,11 +545,13 @@ async def callback_tiktok(callback: types.CallbackQuery):
 
     if action == "tt_video":
         try:
-            filepath = await download_with_progress(
-                callback.message, tiktok_downloader.download_video, url,
-                max_size_mb=MAX_FILE_SIZE_MB,
-                waiting_text="скачиваю видео из tiktok (без водяного знака)..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю видео из tiktok (без водяного знака)...",
+                tiktok_downloader.download_video, url,
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -505,10 +577,13 @@ async def callback_tiktok(callback: types.CallbackQuery):
 
     elif action == "tt_audio":
         try:
-            filepath = await download_with_progress(
-                callback.message, tiktok_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю аудио из tiktok..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю аудио из tiktok...",
+                tiktok_downloader.download_audio, url, "mp3",
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -548,10 +623,13 @@ async def callback_instagram(callback: types.CallbackQuery):
 
     if action == "ig_video":
         try:
-            filepath = await download_with_progress(
-                callback.message, instagram_downloader.download_video, url,
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю видео/reels из instagram..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю видео/reels из instagram...",
+                instagram_downloader.download_video, url,
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -577,10 +655,13 @@ async def callback_instagram(callback: types.CallbackQuery):
 
     elif action == "ig_photo":
         try:
-            result = await download_with_progress(
-                callback.message, instagram_downloader.download_photo, url,
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю фото из instagram..."
+            result, cancelled = await run_download(
+                callback, "скачиваю фото из instagram...",
+                instagram_downloader.download_photo, url,
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             if isinstance(result, list):
                 if not result:
                     raise Exception("фото не найдено")
@@ -622,10 +703,13 @@ async def callback_facebook(callback: types.CallbackQuery):
 
     if action == "fb_audio":
         try:
-            filepath = await download_with_progress(
-                callback.message, facebook_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю аудио (mp3)..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю аудио (mp3)...",
+                facebook_downloader.download_audio, url, "mp3",
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -660,10 +744,13 @@ async def callback_facebook(callback: types.CallbackQuery):
         return
 
     try:
-        filepath = await download_with_progress(
-            callback.message, facebook_downloader.download_video, url, quality,
-            max_size_mb=MAX_FILE_SIZE_MB, waiting_text=f"скачиваю видео facebook ({label})..."
+        filepath, cancelled = await run_download(
+            callback, f"скачиваю видео facebook ({label})...",
+            facebook_downloader.download_video, url, quality,
+            max_size_mb=MAX_FILE_SIZE_MB
         )
+        if cancelled:
+            return
         size_mb = get_file_size_mb(filepath)
         if size_mb > MAX_FILE_SIZE_MB:
             await callback.message.edit_text(
@@ -702,10 +789,13 @@ async def callback_spotify(callback: types.CallbackQuery):
 
     if callback.data == "sp_audio":
         try:
-            filepath = await download_with_progress(
-                callback.message, spotify_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB, waiting_text="скачиваю трек из spotify (mp3)..."
+            filepath, cancelled = await run_download(
+                callback, "скачиваю трек из spotify (mp3)...",
+                spotify_downloader.download_audio, url, "mp3",
+                max_size_mb=MAX_FILE_SIZE_MB
             )
+            if cancelled:
+                return
             size_mb = get_file_size_mb(filepath)
             if size_mb > MAX_FILE_SIZE_MB:
                 await callback.message.edit_text(
@@ -728,3 +818,14 @@ async def callback_spotify(callback: types.CallbackQuery):
             await callback.message.edit_text(generic_error("spotify", e), parse_mode="HTML")
             if 'filepath' in locals():
                 cleanup_temp_file(filepath)
+
+
+# --- ОТМЕНА ЗАГРУЗКИ ---
+@router.callback_query(lambda c: c.data.startswith("cancel:"))
+async def callback_cancel(callback: types.CallbackQuery):
+    job_id = callback.data.split(":", 1)[1]
+    found = download_manager.cancel(job_id)
+    if found:
+        await callback.answer("отменяю...")
+    else:
+        await callback.answer("загрузка уже завершена или отменена")

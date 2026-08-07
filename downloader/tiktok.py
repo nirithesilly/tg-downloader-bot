@@ -6,6 +6,7 @@ import urllib.parse
 from pathlib import Path
 import yt_dlp
 from downloader.base import BaseDownloader, FileTooLargeError
+from utils.download_manager import DownloadCancelled
 
 class TikTokDownloader(BaseDownloader):
     def _fetch_tikwm_info(self, url: str) -> dict:
@@ -24,7 +25,7 @@ class TikTokDownloader(BaseDownloader):
                 return res_data['data']
         raise Exception(f"tikwm api ответ: {res_data.get('msg', 'ошибка')}")
 
-    def _download_file(self, file_url: str, output_path: Path, max_size_mb: int = None) -> str:
+    def _download_file(self, file_url: str, output_path: Path, max_size_mb: int = None, cancel_check=None) -> str:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -36,7 +37,13 @@ class TikTokDownloader(BaseDownloader):
                     raise FileTooLargeError(
                         f"файл слишком большой: ~{int(length) / 1048576:.1f} мб > лимита {max_size_mb} мб"
                     )
-            shutil.copyfileobj(resp, out_file)
+            while True:
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled()
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out_file.write(chunk)
         return str(output_path)
 
     def get_info(self, url: str) -> dict:
@@ -67,7 +74,7 @@ class TikTokDownloader(BaseDownloader):
             except Exception as ydl_err:
                 raise Exception(f"ошибка получения видео tiktok: {ydl_err}")
 
-    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None) -> str:
+    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         try:
             info = self.get_info(url)
             video_direct_url = info.get('video_url')
@@ -75,7 +82,7 @@ class TikTokDownloader(BaseDownloader):
 
             if video_direct_url:
                 file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
-                return self._download_file(video_direct_url, file_path, max_size_mb)
+                return self._download_file(video_direct_url, file_path, max_size_mb, cancel_check)
 
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()
@@ -98,7 +105,7 @@ class TikTokDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка скачивания tiktok видео: {str(e)}")
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         try:
             info = self.get_info(url)
             audio_direct_url = info.get('audio_url')
@@ -106,7 +113,7 @@ class TikTokDownloader(BaseDownloader):
 
             if audio_direct_url:
                 file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.{format}"
-                return self._download_file(audio_direct_url, file_path, max_size_mb)
+                return self._download_file(audio_direct_url, file_path, max_size_mb, cancel_check)
 
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()

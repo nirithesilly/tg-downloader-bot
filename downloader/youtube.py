@@ -26,7 +26,7 @@ class YouTubeDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка получения информации: {str(e)}")
     
-    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         try:
             opts = self.ydl_opts.copy()
             opts['outtmpl'] = self.make_outtmpl()
@@ -58,7 +58,7 @@ class YouTubeDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка скачивания видео: {str(e)}")
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         try:
             opts = self.ydl_opts.copy()
             opts['outtmpl'] = self.make_outtmpl()

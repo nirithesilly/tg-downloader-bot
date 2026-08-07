@@ -195,7 +195,7 @@ class SpotifyDownloader(BaseDownloader):
             cover_path.unlink(missing_ok=True)
         return str(audio_path)
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None) -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         info = self.get_info(url)
         entry = self._search_track(info)
 

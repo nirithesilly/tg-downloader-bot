@@ -35,7 +35,7 @@ class InstagramDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка получения информации instagram: {str(e)}")
     
-    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None) -> str:
+    def download_video(self, url: str, max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
         try:
             opts = self.ydl_opts.copy()
             opts['outtmpl'] = self.make_outtmpl()
@@ -58,7 +58,7 @@ class InstagramDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка скачивания instagram: {str(e)}")
 
-    def download_photo(self, url: str, max_size_mb: int = None, progress_hook=None):
+    def download_photo(self, url: str, max_size_mb: int = None, progress_hook=None, cancel_check=None):
         try:
             opts = self.ydl_opts.copy()
             opts['outtmpl'] = self.make_outtmpl()
