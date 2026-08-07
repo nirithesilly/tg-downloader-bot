@@ -145,9 +145,7 @@ async def cmd_about(message: types.Message):
         "spotify - полностью работает\n\n"
         "<b>обратная связь:</b>\n"
         "по всем вопросам и предложениям:\n"
-        "@nirithesilly\n\n"
-        "<b>исходный код:</b>\n"
-        "https://github.com/nirithesilly/tg-downloader-bot",
+        "@nirithesilly",
         parse_mode="HTML"
     )
 
