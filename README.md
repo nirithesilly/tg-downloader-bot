@@ -25,9 +25,13 @@ hopefully that's useful. i mean. it seemed useful at the time.
 ## other stuff it does
 
 queue + concurrency limit (so it doesn't die when 10 people send links at once)
+
 you can cancel a download mid-way (it cleans up after itself)
+
 anti-spam throttle middleware (1.5s between messages, sorry not sorry)
+
 auto-deletes files from the server after sending (privacy-ish)
+
 periodic cleanup of old files (nothing lives on the server forever)
 
 ## what it does NOT do
@@ -60,18 +64,26 @@ there's also a Dockerfile if you're into that
 
 ## stack
 
-- python 3.13
-- aiogram 3 (async telegram framework)
-- yt-dlp (the actual downloader engine)
-- curl_cffi (impersonates chrome so youtube/etc don't hate us)
-- ffmpeg (for audio extraction - required, make sure it's installed)
+python 3.13
+
+aiogram 3 (async telegram framework)
+
+yt-dlp (the actual downloader engine)
+
+curl_cffi (impersonates chrome so youtube/etc dont hate us)
+
+ffmpeg (for audio extraction - required, make sure it's installed)
+
 
 ## known issues / todos
 
-- some sites (instagram mainly) change their html often, so the downloader breaks from time to time... it's a whack-a-mole thing
-- no tests yet (i know, i know...)
-- no error-retry logic on spotify sometimes
-- cleanup could be smarter
+some sites (instagram mainly) change their html often, so the downloader breaks from time to time... it's a whack-a-mole thing
+
+no tests yet (i know, i know...)
+
+no error-retry logic on spotify sometimes
+
+cleanup could be smarter
 
 ## the end.
 
