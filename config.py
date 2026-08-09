@@ -12,6 +12,8 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in .env file")
 
 MAX_FILE_SIZE_MB = 50
+PART_SIZE_MB = 45
+MAX_DOWNLOAD_SIZE_MB = 1000
 DOWNLOAD_PATH = str(BASE_DIR / "downloads")
 
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)

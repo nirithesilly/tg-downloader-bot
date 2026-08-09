@@ -1,6 +1,6 @@
 import os
-import uuid
 import urllib.request
+import uuid
 from pathlib import Path
 
 from config import DOWNLOAD_PATH
@@ -8,6 +8,7 @@ from utils.download_manager import DownloadCancelled
 
 try:
     import curl_cffi  # noqa: F401
+    import yt_dlp.networking._curlcffi  # noqa: F401
     CURL_CFFI_AVAILABLE = True
 except ImportError:
     CURL_CFFI_AVAILABLE = False
@@ -55,7 +56,8 @@ class BaseDownloader:
 
     def impersonate_opts(self) -> dict:
         if CURL_CFFI_AVAILABLE:
-            return {'impersonate': 'chrome-120'}
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            return {'impersonate': ImpersonateTarget.from_str('chrome')}
         return {}
 
     def _estimate_size(self, info: dict, max_height: int = None):
@@ -93,7 +95,7 @@ class BaseDownloader:
             })
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resolved = resp.geturl()
-                return resolved.split('?')[0] if '?' in resolved else resolved
+                return resolved
         except Exception:
             return url
 

@@ -9,15 +9,20 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 
-from downloader.youtube import YouTubeDownloader
-from downloader.tiktok import TikTokDownloader
-from downloader.instagram import InstagramDownloader
-from downloader.facebook import FacebookDownloader
-from downloader.spotify import SpotifyDownloader
+from config import MAX_DOWNLOAD_SIZE_MB, MAX_FILE_SIZE_MB, PART_SIZE_MB
 from downloader.base import FileTooLargeError
-from config import MAX_FILE_SIZE_MB
-from utils.files import cleanup_temp_file, get_file_size_mb
-from utils.download_manager import download_manager, DownloadCancelled
+from downloader.facebook import FacebookDownloader
+from downloader.instagram import InstagramDownloader
+from downloader.spotify import SpotifyDownloader
+from downloader.tiktok import TikTokDownloader
+from downloader.youtube import YouTubeDownloader
+from utils.download_manager import DownloadCancelled, download_manager
+from utils.files import (
+    cleanup_temp_file,
+    get_file_size_mb,
+    merge_instructions,
+    split_file,
+)
 
 router = Router()
 yt_downloader = YouTubeDownloader()
@@ -184,7 +189,7 @@ async def run_download(callback: types.CallbackQuery, waiting_text: str, func, *
 async def too_large(callback: types.CallbackQuery, size_mb: float):
     try:
         await callback.message.edit_text(
-            f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\n"
+            f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_DOWNLOAD_SIZE_MB} мб)\n"
             "отправь ссылку ещё раз и выбери меньшее качество, если доступно.",
             parse_mode="HTML"
         )
@@ -197,7 +202,7 @@ async def download_and_check(callback: types.CallbackQuery, waiting_text: str, f
     if cancelled:
         return None, True
     size_mb = get_file_size_mb(filepath)
-    if size_mb > MAX_FILE_SIZE_MB:
+    if size_mb > MAX_DOWNLOAD_SIZE_MB:
         cleanup_temp_file(filepath)
         await too_large(callback, size_mb)
         return None, True
@@ -214,6 +219,32 @@ async def send_media(callback: types.CallbackQuery, filepath: str, media_type: s
         await callback.message.answer_document(document=file, caption=caption, parse_mode="HTML")
     cleanup_temp_file(filepath)
     await callback.message.delete()
+
+
+async def send_media_split(callback: types.CallbackQuery, filepath: str, media_type: str, caption: str):
+    size_mb = get_file_size_mb(filepath)
+    if size_mb <= MAX_FILE_SIZE_MB:
+        await send_media(callback, filepath, media_type, caption)
+        return
+
+    parts = split_file(filepath, PART_SIZE_MB)
+    try:
+        for i, part in enumerate(parts, 1):
+            await callback.message.answer_document(
+                document=FSInputFile(part),
+                caption=f"{caption}\nчасть {i}/{len(parts)}" if i == 1 else f"часть {i}/{len(parts)}",
+                parse_mode="HTML"
+            )
+            cleanup_temp_file(part)
+        await callback.message.answer(merge_instructions(), parse_mode="HTML")
+    finally:
+        for part in parts:
+            cleanup_temp_file(part)
+        cleanup_temp_file(filepath)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
 
 # --- КОМАНДА /start ---
@@ -255,6 +286,8 @@ async def cmd_help(message: types.Message):
         "3. <b>получи файл</b>\n"
         "дождись загрузки - бот отправит готовый файл.\n\n"
         "<b>важно:</b>\n"
+        "• файлы до 50 мб отправляются как есть\n"
+        "• файлы больше 50 мб отправляются по частям (склей по инструкции)\n"
         "• файлы автоматически удаляются с сервера после отправки\n"
         "• приватные аккаунты instagram не поддерживаются\n\n"
         "<b>проблемы?</b> пиши @nirithesilly",
@@ -296,7 +329,7 @@ def detect_service(url: str) -> str:
         return "instagram"
     elif re.search(r'https?://(?:[a-zA-Z0-9_-]+\.)?(?:facebook\.com|fb\.watch|fb\.com|fb\.me)', url):
         return "facebook"
-    elif re.search(r'https?://open\.spotify\.com/(?:track|album|playlist)', url):
+    elif re.search(r'https?://(?:[a-zA-Z0-9_-]+\.)?(?:open\.spotify\.com/(?:track|album|playlist|episode|show)|spotify\.link)', url):
         return "spotify"
     else:
         return "unknown"
@@ -310,6 +343,17 @@ async def handle_youtube(message: types.Message):
     try:
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, yt_downloader.get_info, url)
+
+        if info.get('_type') == 'playlist' or info.get('entries'):
+            await message.answer(
+                "<b>плейлисты не поддерживаются.</b>\n"
+                "отправь ссылку на отдельное видео:\n"
+                "<code>youtube.com/watch?v=...</code>\n"
+                "<code>youtu.be/...</code>\n"
+                "<code>youtube.com/shorts/...</code>",
+                parse_mode="HTML"
+            )
+            return
 
         duration = info.get('duration') or 0
         duration_min = duration // 60
@@ -448,9 +492,29 @@ async def handle_facebook(message: types.Message):
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "spotify")
 async def handle_spotify(message: types.Message):
     url = message.text.strip()
-    store_url(message.from_user.id, url, "spotify")
+    resolved_url = spotify_downloader.resolve_url(url)
+    store_url(message.from_user.id, resolved_url, "spotify")
 
-    if not re.search(r'open\.spotify\.com/track/', url):
+    if re.search(r'open\.spotify\.com/(?:album|playlist)/', resolved_url):
+        await message.answer(
+            "<b>поддерживаются только ссылки на отдельные треки spotify.</b>\n"
+            "альбомы и плейлисты не поддерживаются — отправь ссылку на трек\n"
+            "(open.spotify.com/track/...).",
+            parse_mode="HTML"
+        )
+        pop_url(message.from_user.id)
+        return
+
+    if re.search(r'open\.spotify\.com/(?:episode|show)/', resolved_url):
+        await message.answer(
+            "<b>подкасты не поддерживаются.</b>\n"
+            "бот умеет скачивать только треки (open.spotify.com/track/...).",
+            parse_mode="HTML"
+        )
+        pop_url(message.from_user.id)
+        return
+
+    if not re.search(r'open\.spotify\.com/track/', resolved_url):
         await message.answer(
             "<b>поддерживаются только ссылки на треки spotify.</b>\n"
             "отправь ссылку вида open.spotify.com/track/...",
@@ -461,7 +525,7 @@ async def handle_spotify(message: types.Message):
 
     try:
         loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, spotify_downloader.get_info, url)
+        info = await loop.run_in_executor(None, spotify_downloader.get_info, resolved_url)
 
         title_str = esc(str(info.get('title', '')).lower())
         uploader_str = esc(str(info.get('uploader', '')).lower())
@@ -533,11 +597,11 @@ async def callback_youtube(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио (mp3)...",
                 yt_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "audio", "<b>аудио из youtube скачано.</b>")
+            await send_media_split(callback, filepath, "audio", "<b>аудио из youtube скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -556,11 +620,11 @@ async def callback_youtube(callback: types.CallbackQuery):
         filepath, cancelled = await download_and_check(
             callback, f"скачиваю видео youtube ({quality[1]})...",
             yt_downloader.download_video, url, quality[0],
-            max_size_mb=MAX_FILE_SIZE_MB
+            max_size_mb=MAX_DOWNLOAD_SIZE_MB
         )
         if cancelled:
             return
-        await send_media(callback, filepath, "video", "<b>видео из youtube скачано.</b>")
+        await send_media_split(callback, filepath, "video", "<b>видео из youtube скачано.</b>")
     except FileTooLargeError as e:
         await handle_too_large(callback, e)
     except Exception as e:
@@ -584,11 +648,11 @@ async def callback_tiktok(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю видео из tiktok (без водяного знака)...",
                 tiktok_downloader.download_video, url,
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "video", "<b>видео из tiktok скачано.</b> (без водяного знака)")
+            await send_media_split(callback, filepath, "video", "<b>видео из tiktok скачано.</b> (без водяного знака)")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -599,11 +663,11 @@ async def callback_tiktok(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио из tiktok...",
                 tiktok_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "audio", "<b>аудио из tiktok скачано.</b>")
+            await send_media_split(callback, filepath, "audio", "<b>аудио из tiktok скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -627,11 +691,11 @@ async def callback_instagram(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю видео/reels из instagram...",
                 instagram_downloader.download_video, url,
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "video", "<b>видео из instagram скачано.</b>")
+            await send_media_split(callback, filepath, "video", "<b>видео из instagram скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -642,7 +706,7 @@ async def callback_instagram(callback: types.CallbackQuery):
             result, cancelled = await run_download(
                 callback, "скачиваю фото из instagram...",
                 instagram_downloader.download_photo, url,
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
@@ -689,11 +753,11 @@ async def callback_facebook(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио (mp3)...",
                 facebook_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "audio", "<b>аудио из facebook скачано.</b>")
+            await send_media_split(callback, filepath, "audio", "<b>аудио из facebook скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -712,11 +776,11 @@ async def callback_facebook(callback: types.CallbackQuery):
         filepath, cancelled = await download_and_check(
             callback, f"скачиваю видео facebook ({quality[1]})...",
             facebook_downloader.download_video, url, quality[0],
-            max_size_mb=MAX_FILE_SIZE_MB
+            max_size_mb=MAX_DOWNLOAD_SIZE_MB
         )
         if cancelled:
             return
-        await send_media(callback, filepath, "video", "<b>видео из facebook скачано.</b>")
+        await send_media_split(callback, filepath, "video", "<b>видео из facebook скачано.</b>")
     except FileTooLargeError as e:
         await handle_too_large(callback, e)
     except Exception as e:
@@ -739,11 +803,11 @@ async def callback_spotify(callback: types.CallbackQuery):
             filepath, cancelled = await download_and_check(
                 callback, "скачиваю трек из spotify (mp3)...",
                 spotify_downloader.download_audio, url, "mp3",
-                max_size_mb=MAX_FILE_SIZE_MB
+                max_size_mb=MAX_DOWNLOAD_SIZE_MB
             )
             if cancelled:
                 return
-            await send_media(callback, filepath, "audio", "<b>трек из spotify скачан.</b>")
+            await send_media_split(callback, filepath, "audio", "<b>трек из spotify скачан.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:

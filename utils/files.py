@@ -5,6 +5,7 @@ from pathlib import Path
 
 from config import DOWNLOAD_PATH
 
+
 def get_temp_path(filename: str) -> str:
     return os.path.join(DOWNLOAD_PATH, filename)
 
@@ -44,4 +45,28 @@ def cleanup_old_files(max_age_hours: int = 24) -> int:
     except OSError as e:
         print(f"Failed to clean downloads folder: {e}")
     return removed
+
+def split_file(filepath: str, part_size_mb: int = 45) -> list[str]:
+    chunk = part_size_mb * 1024 * 1024
+    parts = []
+    with open(filepath, 'rb') as src:
+        idx = 1
+        while True:
+            data = src.read(chunk)
+            if not data:
+                break
+            part_path = f"{filepath}.part{idx:03d}"
+            with open(part_path, 'wb') as out:
+                out.write(data)
+            parts.append(part_path)
+            idx += 1
+    return parts
+
+def merge_instructions() -> str:
+    return (
+        "файл превысил лимит телеграма, поэтому отправлен по частям.\n"
+        "скачай все части и склей их в один файл:\n"
+        "<b>linux/mac:</b> <code>cat file.part* &gt; file</code>\n"
+        "<b>windows (cmd):</b> <code>copy /b file.part001+file.part002+... file</code>"
+    )
 
