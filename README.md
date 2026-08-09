@@ -24,18 +24,18 @@ hopefully that's useful. i mean. it seemed useful at the time.
 
 ## other stuff it does
 
-- queue + concurrency limit (so it doesn't die when 10 people send links at once)
-- you can cancel a download mid-way (it cleans up after itself)
-- anti-spam throttle middleware (1.5s between messages, sorry not sorry)
-- auto-deletes files from the server after sending (privacy-ish)
-- periodic cleanup of old files (nothing lives on the server forever)
+queue + concurrency limit (so it doesn't die when 10 people send links at once)
+you can cancel a download mid-way (it cleans up after itself)
+anti-spam throttle middleware (1.5s between messages, sorry not sorry)
+auto-deletes files from the server after sending (privacy-ish)
+periodic cleanup of old files (nothing lives on the server forever)
 
 ## what it does NOT do
 
-- private instagram accounts
-- youtube playlists (single videos only, sorry)
-- spotify albums/playlists / podcasts (track links only)
-- hosting... yeah it's not deployed anywhere. it's just code. for now.
+private instagram accounts
+youtube playlists (single videos only, sorry)
+spotify albums/playlists / podcasts (track links only)
+hosting... yeah it's not deployed anywhere. it's just code. for now.
 
 ## how to run it
 
