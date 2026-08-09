@@ -1,10 +1,16 @@
 import os
 import uuid
 import urllib.request
-import urllib.parse
 from pathlib import Path
-import yt_dlp
+
 from config import DOWNLOAD_PATH
+from utils.download_manager import DownloadCancelled
+
+try:
+    import curl_cffi  # noqa: F401
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CURL_CFFI_AVAILABLE = False
 
 
 class FileTooLargeError(Exception):
@@ -15,6 +21,7 @@ class BaseDownloader:
     def __init__(self):
         self.download_path = DOWNLOAD_PATH
         os.makedirs(self.download_path, exist_ok=True)
+        self._stamp = None
         self.default_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -25,7 +32,31 @@ class BaseDownloader:
         }
 
     def make_outtmpl(self) -> str:
-        return f'{self.download_path}/%(title).50s_%(id)s_{uuid.uuid4().hex[:8]}.%(ext)s'
+        self._stamp = uuid.uuid4().hex[:8]
+        return f'{self.download_path}/%(title).50s_%(id)s_{self._stamp}.%(ext)s'
+
+    def cleanup_partial(self):
+        stamp = getattr(self, '_stamp', None)
+        if not stamp:
+            return
+        try:
+            for f in Path(self.download_path).glob(f"*{stamp}*"):
+                f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _make_progress_hook(self, progress_hook=None, cancel_check=None):
+        def hook(d):
+            if cancel_check and cancel_check():
+                raise DownloadCancelled()
+            if progress_hook:
+                progress_hook(d)
+        return hook
+
+    def impersonate_opts(self) -> dict:
+        if CURL_CFFI_AVAILABLE:
+            return {'impersonate': 'chrome-120'}
+        return {}
 
     def _estimate_size(self, info: dict, max_height: int = None):
         formats = info.get('formats') or []

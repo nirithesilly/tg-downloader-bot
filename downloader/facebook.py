@@ -1,7 +1,11 @@
 import urllib.request
 from pathlib import Path
+
 import yt_dlp
+
 from downloader.base import BaseDownloader, FileTooLargeError
+from utils.download_manager import DownloadCancelled
+
 
 class FacebookDownloader(BaseDownloader):
     def resolve_url(self, url: str) -> str:
@@ -19,7 +23,7 @@ class FacebookDownloader(BaseDownloader):
     def get_info(self, url: str) -> dict:
         resolved = self.resolve_url(url)
         opts = self.default_opts.copy()
-        opts['impersonate'] = 'chrome-120'
+        opts.update(self.impersonate_opts())
         opts['http_headers'] = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -36,30 +40,41 @@ class FacebookDownloader(BaseDownloader):
         except Exception as e:
             raise Exception(f"ошибка facebook: {str(e)}")
 
-    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
-        resolved = self.resolve_url(url)
-        opts = self.default_opts.copy()
-        opts['outtmpl'] = self.make_outtmpl()
-        opts['impersonate'] = 'chrome-120'
-        opts['http_headers'] = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
+    def _video_format(self, quality: str) -> str:
         if quality == "720p":
-            opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
-            max_height = 720
-        elif quality == "480p":
-            opts['format'] = 'bestvideo[height<=480]+bestaudio/best[height<=480]/best'
-            max_height = 480
-        else:
-            opts['format'] = 'bestvideo+bestaudio/best'
-            max_height = None
-        if progress_hook:
-            opts['progress_hooks'] = [progress_hook]
+            return ('bestvideo[height<=720]+bestaudio'
+                    '/best[height<=720]/best')
+        if quality == "480p":
+            return ('bestvideo[height<=480]+bestaudio'
+                    '/best[height<=480]/best')
+        return 'bestvideo+bestaudio/best'
 
+    def download_video(self, url: str, quality: str = "best", max_size_mb: int = None,
+                       progress_hook=None, cancel_check=None) -> str:
+        if cancel_check and cancel_check():
+            raise DownloadCancelled()
+        resolved = self.resolve_url(url)
         try:
+            opts = self.default_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
+            opts.update(self.impersonate_opts())
+            opts['http_headers'] = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            opts['format'] = self._video_format(quality)
+            opts['postprocessors'] = [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }]
+            if progress_hook or cancel_check:
+                opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
+            max_height = 720 if quality == "720p" else 480 if quality == "480p" else None
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(resolved, download=False)
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled()
                 estimated = self._estimate_size(info, max_height)
                 if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
                     raise FileTooLargeError(
@@ -70,30 +85,36 @@ class FacebookDownloader(BaseDownloader):
                 return self.safe_find_file(filename, info.get('id', ''))
         except FileTooLargeError:
             raise
-        except Exception as e:
-            raise Exception(f"ошибка скачивания facebook: {str(e)}")
+        except Exception:
+            self.cleanup_partial()
+            raise
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None,
+                       progress_hook=None, cancel_check=None) -> str:
+        if cancel_check and cancel_check():
+            raise DownloadCancelled()
         resolved = self.resolve_url(url)
-        opts = self.default_opts.copy()
-        opts['outtmpl'] = self.make_outtmpl()
-        opts['impersonate'] = 'chrome-120'
-        opts['http_headers'] = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        opts['format'] = 'bestaudio/best'
-        opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': format,
-            'preferredquality': '192',
-        }]
-        if progress_hook:
-            opts['progress_hooks'] = [progress_hook]
-
         try:
+            opts = self.default_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
+            opts.update(self.impersonate_opts())
+            opts['http_headers'] = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            opts['format'] = 'bestaudio/best'
+            opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': format,
+                'preferredquality': '192',
+            }]
+            if progress_hook or cancel_check:
+                opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(resolved, download=False)
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled()
                 estimated = self._estimate_size(info)
                 if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
                     raise FileTooLargeError(
@@ -105,5 +126,6 @@ class FacebookDownloader(BaseDownloader):
                 return str(Path(self.download_path) / f"{base}.{format}")
         except FileTooLargeError:
             raise
-        except Exception as e:
-            raise Exception(f"ошибка скачивания аудио facebook: {str(e)}")
+        except Exception:
+            self.cleanup_partial()
+            raise

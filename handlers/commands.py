@@ -1,8 +1,10 @@
 import asyncio
 import html
 import logging
+import platform
 import re
 import time
+
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
@@ -24,7 +26,36 @@ instagram_downloader = InstagramDownloader()
 facebook_downloader = FacebookDownloader()
 spotify_downloader = SpotifyDownloader()
 
+USER_URL_TTL = 600
+MAX_USER_URLS = 200
+
 user_urls = {}
+
+
+def store_url(user_id: int, url: str, service: str):
+    if len(user_urls) > MAX_USER_URLS:
+        now = time.time()
+        for uid in [uid for uid, d in user_urls.items()
+                    if now - d.get("ts", 0) > USER_URL_TTL]:
+            user_urls.pop(uid, None)
+    user_urls[user_id] = {"url": url, "service": service, "ts": time.time()}
+
+
+def get_url(user_id: int):
+    data = user_urls.get(user_id)
+    if not data:
+        return None
+    if time.time() - data["ts"] > USER_URL_TTL:
+        user_urls.pop(user_id, None)
+        return None
+    return data
+
+
+def pop_url(user_id: int):
+    data = get_url(user_id)
+    if data:
+        user_urls.pop(user_id, None)
+    return data
 
 
 def cancel_kb(job_id: str):
@@ -150,6 +181,41 @@ async def run_download(callback: types.CallbackQuery, waiting_text: str, func, *
         await download_manager.release_slot(job)
 
 
+async def too_large(callback: types.CallbackQuery, size_mb: float):
+    try:
+        await callback.message.edit_text(
+            f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\n"
+            "отправь ссылку ещё раз и выбери меньшее качество, если доступно.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
+async def download_and_check(callback: types.CallbackQuery, waiting_text: str, func, *args, **kwargs):
+    filepath, cancelled = await run_download(callback, waiting_text, func, *args, **kwargs)
+    if cancelled:
+        return None, True
+    size_mb = get_file_size_mb(filepath)
+    if size_mb > MAX_FILE_SIZE_MB:
+        cleanup_temp_file(filepath)
+        await too_large(callback, size_mb)
+        return None, True
+    return filepath, False
+
+
+async def send_media(callback: types.CallbackQuery, filepath: str, media_type: str, caption: str):
+    file = FSInputFile(filepath)
+    if media_type == "audio":
+        await callback.message.answer_audio(audio=file, caption=caption, parse_mode="HTML")
+    elif media_type == "video":
+        await callback.message.answer_video(video=file, caption=caption, parse_mode="HTML")
+    else:
+        await callback.message.answer_document(document=file, caption=caption, parse_mode="HTML")
+    cleanup_temp_file(filepath)
+    await callback.message.delete()
+
+
 # --- КОМАНДА /start ---
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -201,10 +267,10 @@ async def cmd_about(message: types.Message):
     await message.answer(
         "<b>о боте</b>\n\n"
         "<b>название:</b> media downloader bot\n"
-        "<b>версия:</b> 2.0.0\n"
+        "<b>версия:</b> 2.1.0\n"
         "<b>автор:</b> @nirithesilly\n\n"
         "<b>технологии:</b>\n"
-        "• python 3.13\n"
+        f"• python {platform.python_version()}\n"
         "• aiogram 3\n"
         "• yt-dlp\n"
         "• ffmpeg\n\n"
@@ -239,7 +305,7 @@ def detect_service(url: str) -> str:
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "youtube")
 async def handle_youtube(message: types.Message):
     url = message.text.strip()
-    user_urls[message.from_user.id] = {"url": url, "service": "youtube"}
+    store_url(message.from_user.id, url, "youtube")
 
     try:
         loop = asyncio.get_running_loop()
@@ -277,7 +343,7 @@ async def handle_youtube(message: types.Message):
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "tiktok")
 async def handle_tiktok(message: types.Message):
     url = message.text.strip()
-    user_urls[message.from_user.id] = {"url": url, "service": "tiktok"}
+    store_url(message.from_user.id, url, "tiktok")
 
     try:
         loop = asyncio.get_running_loop()
@@ -308,7 +374,7 @@ async def handle_tiktok(message: types.Message):
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "instagram")
 async def handle_instagram(message: types.Message):
     url = message.text.strip()
-    user_urls[message.from_user.id] = {"url": url, "service": "instagram"}
+    store_url(message.from_user.id, url, "instagram")
 
     try:
         loop = asyncio.get_running_loop()
@@ -349,7 +415,7 @@ async def handle_instagram(message: types.Message):
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "facebook")
 async def handle_facebook(message: types.Message):
     url = message.text.strip()
-    user_urls[message.from_user.id] = {"url": url, "service": "facebook"}
+    store_url(message.from_user.id, url, "facebook")
 
     try:
         loop = asyncio.get_running_loop()
@@ -382,7 +448,7 @@ async def handle_facebook(message: types.Message):
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "spotify")
 async def handle_spotify(message: types.Message):
     url = message.text.strip()
-    user_urls[message.from_user.id] = {"url": url, "service": "spotify"}
+    store_url(message.from_user.id, url, "spotify")
 
     if not re.search(r'open\.spotify\.com/track/', url):
         await message.answer(
@@ -390,7 +456,7 @@ async def handle_spotify(message: types.Message):
             "отправь ссылку вида open.spotify.com/track/...",
             parse_mode="HTML"
         )
-        user_urls.pop(message.from_user.id, None)
+        pop_url(message.from_user.id)
         return
 
     try:
@@ -454,211 +520,122 @@ async def handle_too_large(callback: types.CallbackQuery, error: FileTooLargeErr
 async def callback_youtube(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = user_urls.get(callback.from_user.id)
+    data = pop_url(callback.from_user.id)
     if not data or data.get("service") != "youtube":
-        await callback.message.edit_text("ссылка не найдена. отправьте ссылку заново.")
+        await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
     action = callback.data
-    user_urls.pop(callback.from_user.id, None)
 
     if action == "yt_audio":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио (mp3)...",
                 yt_downloader.download_audio, url, "mp3",
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз и выбери меньшее качество.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            audio = FSInputFile(filepath)
-            await callback.message.answer_audio(
-                audio=audio,
-                caption="<b>аудио из facebook скачано.</b>",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "audio", "<b>аудио из youtube скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
-            await callback.message.edit_text(generic_error("facebook", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
+            await callback.message.edit_text(generic_error("youtube", e), parse_mode="HTML")
         return
 
-    if action == "fb_video":
-        quality, label = "best", "лучшего качества"
-    elif action == "fb_video_720":
-        quality, label = "720p", "720p"
-    elif action == "fb_video_480":
-        quality, label = "480p", "480p"
-    else:
+    quality = {
+        "yt_video": ("best", "лучшего качества"),
+        "yt_video_720": ("720p", "720p"),
+        "yt_video_480": ("480p", "480p"),
+    }.get(action)
+    if not quality:
         return
 
     try:
-        filepath, cancelled = await run_download(
-            callback, f"скачиваю видео facebook ({label})...",
-            facebook_downloader.download_video, url, quality,
+        filepath, cancelled = await download_and_check(
+            callback, f"скачиваю видео youtube ({quality[1]})...",
+            yt_downloader.download_video, url, quality[0],
             max_size_mb=MAX_FILE_SIZE_MB
         )
         if cancelled:
             return
-        size_mb = get_file_size_mb(filepath)
-        if size_mb > MAX_FILE_SIZE_MB:
-            await callback.message.edit_text(
-                f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз и выбери меньшее качество.",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            return
-        video = FSInputFile(filepath)
-        await callback.message.answer_document(
-            document=video,
-            caption="<b>видео скачано.</b>",
-            parse_mode="HTML"
-        )
-        cleanup_temp_file(filepath)
-        await callback.message.delete()
+        await send_media(callback, filepath, "video", "<b>видео из youtube скачано.</b>")
     except FileTooLargeError as e:
         await handle_too_large(callback, e)
     except Exception as e:
         await callback.message.edit_text(generic_error("youtube", e), parse_mode="HTML")
-        if 'filepath' in locals():
-            cleanup_temp_file(filepath)
 
 # --- КОЛБЭКИ TIKTOK ---
 @router.callback_query(lambda c: c.data.startswith("tt_"))
 async def callback_tiktok(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = user_urls.get(callback.from_user.id)
+    data = pop_url(callback.from_user.id)
     if not data or data.get("service") != "tiktok":
-        await callback.message.edit_text("ссылка не найдена. отправьте ссылку заново.")
+        await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
     action = callback.data
-    user_urls.pop(callback.from_user.id, None)
 
     if action == "tt_video":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю видео из tiktok (без водяного знака)...",
                 tiktok_downloader.download_video, url,
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            video = FSInputFile(filepath)
-            await callback.message.answer_video(
-                video=video,
-                caption="<b>видео из tiktok скачано.</b> (без водяного знака)",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "video", "<b>видео из tiktok скачано.</b> (без водяного знака)")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("tiktok", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
 
     elif action == "tt_audio":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио из tiktok...",
                 tiktok_downloader.download_audio, url, "mp3",
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            audio = FSInputFile(filepath)
-            await callback.message.answer_audio(
-                audio=audio,
-                caption="<b>аудио из tiktok скачано.</b>",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "audio", "<b>аудио из tiktok скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("tiktok", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
 
 # --- КОЛБЭКИ INSTAGRAM ---
 @router.callback_query(lambda c: c.data.startswith("ig_"))
 async def callback_instagram(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = user_urls.get(callback.from_user.id)
+    data = pop_url(callback.from_user.id)
     if not data or data.get("service") != "instagram":
-        await callback.message.edit_text("ссылка не найдена. отправьте ссылку заново.")
+        await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
     action = callback.data
-    user_urls.pop(callback.from_user.id, None)
 
     if action == "ig_video":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю видео/reels из instagram...",
                 instagram_downloader.download_video, url,
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            video = FSInputFile(filepath)
-            await callback.message.answer_video(
-                video=video,
-                caption="<b>видео из instagram скачано.</b>",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "video", "<b>видео из instagram скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("instagram", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
 
     elif action == "ig_photo":
         try:
@@ -677,155 +654,100 @@ async def callback_instagram(callback: types.CallbackQuery):
                 for f in result:
                     cleanup_temp_file(f)
             else:
-                photo = FSInputFile(result)
+                size_mb = get_file_size_mb(result)
+                if size_mb > MAX_FILE_SIZE_MB:
+                    cleanup_temp_file(result)
+                    await too_large(callback, size_mb)
+                    return
                 await callback.message.answer_photo(
-                    photo=photo,
+                    photo=FSInputFile(result),
                     caption="<b>фото из instagram скачано.</b>",
                     parse_mode="HTML"
                 )
                 cleanup_temp_file(result)
             await callback.message.delete()
+        except FileTooLargeError as e:
+            await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("instagram", e), parse_mode="HTML")
-            if 'result' in locals():
-                if isinstance(result, list):
-                    for f in result:
-                        cleanup_temp_file(f)
-                else:
-                    cleanup_temp_file(result)
 
 # --- КОЛБЭКИ FACEBOOK ---
 @router.callback_query(lambda c: c.data.startswith("fb_"))
 async def callback_facebook(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = user_urls.get(callback.from_user.id)
+    data = pop_url(callback.from_user.id)
     if not data or data.get("service") != "facebook":
-        await callback.message.edit_text("ссылка не найдена. отправьте ссылку заново.")
+        await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
     action = callback.data
-    user_urls.pop(callback.from_user.id, None)
 
     if action == "fb_audio":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю аудио (mp3)...",
                 facebook_downloader.download_audio, url, "mp3",
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз и выбери меньшее качество.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            audio = FSInputFile(filepath)
-            await callback.message.answer_audio(
-                audio=audio,
-                caption="<b>аудио из facebook скачано.</b>",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "audio", "<b>аудио из facebook скачано.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("facebook", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
         return
 
-    if action == "fb_video":
-        quality, label = "best", "лучшего качества"
-    elif action == "fb_video_720":
-        quality, label = "720p", "720p"
-    elif action == "fb_video_480":
-        quality, label = "480p", "480p"
-    else:
+    quality = {
+        "fb_video": ("best", "лучшего качества"),
+        "fb_video_720": ("720p", "720p"),
+        "fb_video_480": ("480p", "480p"),
+    }.get(action)
+    if not quality:
         return
 
     try:
-        filepath, cancelled = await run_download(
-            callback, f"скачиваю видео facebook ({label})...",
-            facebook_downloader.download_video, url, quality,
+        filepath, cancelled = await download_and_check(
+            callback, f"скачиваю видео facebook ({quality[1]})...",
+            facebook_downloader.download_video, url, quality[0],
             max_size_mb=MAX_FILE_SIZE_MB
         )
         if cancelled:
             return
-        size_mb = get_file_size_mb(filepath)
-        if size_mb > MAX_FILE_SIZE_MB:
-            await callback.message.edit_text(
-                f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз и выбери меньшее качество.",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            return
-        video = FSInputFile(filepath)
-        await callback.message.answer_document(
-            document=video,
-            caption="<b>видео из facebook скачано.</b>",
-            parse_mode="HTML"
-        )
-        cleanup_temp_file(filepath)
-        await callback.message.delete()
+        await send_media(callback, filepath, "video", "<b>видео из facebook скачано.</b>")
     except FileTooLargeError as e:
         await handle_too_large(callback, e)
     except Exception as e:
         await callback.message.edit_text(generic_error("facebook", e), parse_mode="HTML")
-        if 'filepath' in locals():
-            cleanup_temp_file(filepath)
 
 # --- КОЛБЭКИ SPOTIFY ---
 @router.callback_query(lambda c: c.data.startswith("sp_"))
 async def callback_spotify(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = user_urls.get(callback.from_user.id)
+    data = pop_url(callback.from_user.id)
     if not data or data.get("service") != "spotify":
-        await callback.message.edit_text("ссылка не найдена. отправьте ссылку заново.")
+        await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
-    user_urls.pop(callback.from_user.id, None)
 
     if callback.data == "sp_audio":
         try:
-            filepath, cancelled = await run_download(
+            filepath, cancelled = await download_and_check(
                 callback, "скачиваю трек из spotify (mp3)...",
                 spotify_downloader.download_audio, url, "mp3",
                 max_size_mb=MAX_FILE_SIZE_MB
             )
             if cancelled:
                 return
-            size_mb = get_file_size_mb(filepath)
-            if size_mb > MAX_FILE_SIZE_MB:
-                await callback.message.edit_text(
-                    f"<b>файл слишком большой.</b> ({size_mb:.1f} мб > лимита {MAX_FILE_SIZE_MB} мб)\nотправь ссылку ещё раз.",
-                    parse_mode="HTML"
-                )
-                cleanup_temp_file(filepath)
-                return
-            audio = FSInputFile(filepath)
-            await callback.message.answer_audio(
-                audio=audio,
-                caption="<b>трек из spotify скачан.</b>",
-                parse_mode="HTML"
-            )
-            cleanup_temp_file(filepath)
-            await callback.message.delete()
+            await send_media(callback, filepath, "audio", "<b>трек из spotify скачан.</b>")
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
             await callback.message.edit_text(generic_error("spotify", e), parse_mode="HTML")
-            if 'filepath' in locals():
-                cleanup_temp_file(filepath)
-
 
 # --- ОТМЕНА ЗАГРУЗКИ ---
 @router.callback_query(lambda c: c.data.startswith("cancel:"))

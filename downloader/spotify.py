@@ -5,8 +5,11 @@ import urllib.request
 import urllib.parse
 from difflib import SequenceMatcher
 from pathlib import Path
+
 import yt_dlp
+
 from downloader.base import BaseDownloader, FileTooLargeError
+from utils.download_manager import DownloadCancelled
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -111,7 +114,7 @@ class SpotifyDownloader(BaseDownloader):
                 score -= 15
         return score
 
-    def _search_track(self, info: dict) -> dict:
+    def _search_track(self, info: dict, cancel_check=None) -> dict:
         artist, title = info['artist'], info['title']
         queries = [
             f"{artist} - {title}",
@@ -134,11 +137,15 @@ class SpotifyDownloader(BaseDownloader):
             }
         }) as ydl:
             for query in queries:
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled()
                 try:
                     results = ydl.extract_info(f"ytsearch5:{query}", download=False)
                 except Exception:
                     continue
                 for entry in results.get('entries') or []:
+                    if cancel_check and cancel_check():
+                        raise DownloadCancelled()
                     score = self._match_score(entry, artist, title)
                     if score > best_score:
                         best_score, best_entry = score, entry
@@ -195,28 +202,31 @@ class SpotifyDownloader(BaseDownloader):
             cover_path.unlink(missing_ok=True)
         return str(audio_path)
 
-    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None, progress_hook=None, cancel_check=None) -> str:
-        info = self.get_info(url)
-        entry = self._search_track(info)
-
-        opts = self.default_opts.copy()
-        opts['outtmpl'] = self.make_outtmpl()
-        opts['format'] = 'bestaudio/best'
-        opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
-            }
-        }
-        opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': format,
-            'preferredquality': '192',
-        }]
-        if progress_hook:
-            opts['progress_hooks'] = [progress_hook]
-
+    def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None,
+                       progress_hook=None, cancel_check=None) -> str:
+        if cancel_check and cancel_check():
+            raise DownloadCancelled()
         try:
+            info = self.get_info(url)
+            entry = self._search_track(info, cancel_check)
+
+            opts = self.default_opts.copy()
+            opts['outtmpl'] = self.make_outtmpl()
+            opts['format'] = 'bestaudio/best'
+            opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['hls', 'dash'],
+                }
+            }
+            opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': format,
+                'preferredquality': '192',
+            }]
+            if progress_hook or cancel_check:
+                opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
+
             estimated = self._estimate_size(entry)
             if max_size_mb and estimated and estimated > max_size_mb * 1024 * 1024:
                 raise FileTooLargeError(
@@ -226,9 +236,14 @@ class SpotifyDownloader(BaseDownloader):
                 ydl.process_ie_result(entry, download=True)
                 filename = ydl.prepare_filename(entry)
                 audio_path = Path(self.download_path) / f"{Path(filename).stem}.{format}"
+
+            if cancel_check and cancel_check():
+                raise DownloadCancelled()
+            return self._apply_metadata_and_cover(audio_path, info)
         except FileTooLargeError:
             raise
-        except Exception as e:
-            raise Exception(f"ошибка скачивания spotify: {str(e)}")
-
-        return self._apply_metadata_and_cover(audio_path, info)
+        except DownloadCancelled:
+            raise
+        except Exception:
+            self.cleanup_partial()
+            raise
