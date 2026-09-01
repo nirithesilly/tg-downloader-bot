@@ -1,9 +1,15 @@
+import logging
 from pathlib import Path
+from typing import Optional
 
 import yt_dlp
 
 from downloader.base import BaseDownloader, FileTooLargeError
 from utils.download_manager import DownloadCancelled
+
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 
 
 class YouTubeDownloader(BaseDownloader):
@@ -17,18 +23,22 @@ class YouTubeDownloader(BaseDownloader):
             }
         }
 
-    def get_info(self, url: str) -> dict:
-        try:
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return {
-                    'title': info.get('title', 'Unknown'),
-                    'duration': info.get('duration', 0),
-                    'uploader': info.get('uploader', 'Unknown'),
-                    'thumbnail': info.get('thumbnail', None),
-                }
-        except Exception as e:
-            raise Exception(f"ошибка получения информации: {str(e)}")
+    def get_info(self, url: str, **kwargs) -> dict:
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return {
+                        'title': info.get('title', 'Unknown'),
+                        'duration': info.get('duration', 0),
+                        'uploader': info.get('uploader', 'Unknown'),
+                        'thumbnail': info.get('thumbnail', None),
+                    }
+            except Exception as e:
+                last_err = e
+                log.warning("youtube get_info attempt %d failed: %s", attempt + 1, e)
+        raise Exception(f"ошибка получения информации: {str(last_err)}")
 
     def _video_format(self, quality: str) -> str:
         if quality == "720p":

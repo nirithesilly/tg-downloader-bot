@@ -1,7 +1,9 @@
 import os
+import time
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from config import DOWNLOAD_PATH
 from utils.download_manager import DownloadCancelled
@@ -22,8 +24,9 @@ class BaseDownloader:
     def __init__(self):
         self.download_path = DOWNLOAD_PATH
         os.makedirs(self.download_path, exist_ok=True)
-        self._stamp = None
-        self.default_opts = {
+        self._stamp: Optional[str] = None
+        self._info_cache: dict[str, tuple[float, dict]] = {}
+        self.default_opts: dict = {
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 30,
@@ -36,7 +39,7 @@ class BaseDownloader:
         self._stamp = uuid.uuid4().hex[:8]
         return f'{self.download_path}/%(title).50s_%(id)s_{self._stamp}.%(ext)s'
 
-    def cleanup_partial(self):
+    def cleanup_partial(self) -> None:
         stamp = getattr(self, '_stamp', None)
         if not stamp:
             return
@@ -46,8 +49,9 @@ class BaseDownloader:
         except OSError:
             pass
 
-    def _make_progress_hook(self, progress_hook=None, cancel_check=None):
-        def hook(d):
+    def _make_progress_hook(self, progress_hook: Optional[callable] = None,
+                            cancel_check: Optional[callable] = None) -> callable:
+        def hook(d: dict) -> None:
             if cancel_check and cancel_check():
                 raise DownloadCancelled()
             if progress_hook:
@@ -60,12 +64,12 @@ class BaseDownloader:
             return {'impersonate': ImpersonateTarget.from_str('chrome')}
         return {}
 
-    def _estimate_size(self, info: dict, max_height: int = None):
+    def _estimate_size(self, info: dict, max_height: Optional[int] = None) -> Optional[int]:
         formats = info.get('formats') or []
         if not formats:
             return info.get('filesize') or info.get('filesize_approx') or None
 
-        def size(f):
+        def size(f: dict) -> int:
             return f.get('filesize') or f.get('filesize_approx') or 0
 
         candidates = formats
@@ -105,3 +109,18 @@ class BaseDownloader:
         for f in Path(self.download_path).glob(f"*{stem}*"):
             return str(f)
         return filename
+
+    def get_info_cached(self, url: str, max_age: int = 300, **kwargs) -> dict:
+        now = time.time()
+        cached = self._info_cache.get(url)
+        if cached and now - cached[0] < max_age:
+            return cached[1]
+        info = self.get_info(url, **kwargs)
+        self._info_cache[url] = (now, info)
+        expired = [k for k, (ts, _) in self._info_cache.items() if now - ts > max_age]
+        for k in expired:
+            self._info_cache.pop(k, None)
+        return info
+
+    def get_info(self, url: str, **kwargs) -> dict:
+        raise NotImplementedError

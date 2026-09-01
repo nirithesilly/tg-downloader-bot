@@ -1,17 +1,25 @@
 import asyncio
 import logging
+import logging.handlers
 import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, LOG_DIR
 from handlers import commands, messages
 from middlewares.throttling import ThrottlingMiddleware
 from utils.files import cleanup_old_files
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format=log_format)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    f"{LOG_DIR}/bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+file_handler.setFormatter(logging.Formatter(log_format))
+logging.getLogger().addHandler(file_handler)
 
 
 async def periodic_cleanup():
@@ -37,6 +45,7 @@ async def main():
 
     asyncio.create_task(periodic_cleanup())
 
+    logging.info("bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

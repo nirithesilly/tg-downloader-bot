@@ -1,13 +1,19 @@
 import json
+import logging
 import uuid
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from typing import Optional
 
 import yt_dlp
 
 from downloader.base import BaseDownloader, FileTooLargeError
 from utils.download_manager import DownloadCancelled
+
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 
 
 class TikTokDownloader(BaseDownloader):
@@ -53,33 +59,38 @@ class TikTokDownloader(BaseDownloader):
             output_path.unlink(missing_ok=True)
             raise
 
-    def get_info(self, url: str) -> dict:
+    def get_info(self, url: str, **kwargs) -> dict:
         resolved_url = self.resolve_url(url)
-        try:
-            tikwm_data = self._fetch_tikwm_info(resolved_url)
-            author = tikwm_data.get('author', {})
-            return {
-                'title': tikwm_data.get('title') or 'tiktok video',
-                'uploader': author.get('nickname') or author.get('unique_id') or 'unknown',
-                'duration': tikwm_data.get('duration', 0),
-                'description': (tikwm_data.get('title') or '')[:200],
-                'video_url': tikwm_data.get('hdplay') or tikwm_data.get('play'),
-                'audio_url': tikwm_data.get('music'),
-                'id': tikwm_data.get('id', 'tiktok_video')
-            }
-        except Exception:
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
             try:
-                with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                    info = ydl.extract_info(resolved_url, download=False)
-                    return {
-                        'title': info.get('title', 'tiktok video'),
-                        'uploader': info.get('uploader', 'unknown'),
-                        'duration': info.get('duration', 0),
-                        'description': info.get('description', '')[:200],
-                        'id': info.get('id', 'tiktok_video')
-                    }
-            except Exception as ydl_err:
-                raise Exception(f"ошибка получения видео tiktok: {ydl_err}")
+                tikwm_data = self._fetch_tikwm_info(resolved_url)
+                author = tikwm_data.get('author', {})
+                return {
+                    'title': tikwm_data.get('title') or 'tiktok video',
+                    'uploader': author.get('nickname') or author.get('unique_id') or 'unknown',
+                    'duration': tikwm_data.get('duration', 0),
+                    'description': (tikwm_data.get('title') or '')[:200],
+                    'video_url': tikwm_data.get('hdplay') or tikwm_data.get('play'),
+                    'audio_url': tikwm_data.get('music'),
+                    'id': tikwm_data.get('id', 'tiktok_video')
+                }
+            except Exception as e:
+                last_err = e
+                log.warning("tiktok get_info attempt %d failed: %s", attempt + 1, e)
+                try:
+                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                        info = ydl.extract_info(resolved_url, download=False)
+                        return {
+                            'title': info.get('title', 'tiktok video'),
+                            'uploader': info.get('uploader', 'unknown'),
+                            'duration': info.get('duration', 0),
+                            'description': info.get('description', '')[:200],
+                            'id': info.get('id', 'tiktok_video')
+                        }
+                except Exception:
+                    continue
+        raise Exception(f"ошибка получения видео tiktok: {last_err}")
 
     def download_video(self, url: str, max_size_mb: int = None, progress_hook=None,
                        cancel_check=None) -> str:

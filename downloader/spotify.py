@@ -1,16 +1,21 @@
 import json
+import logging
 import re
 import subprocess
 import urllib.request
 import urllib.parse
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Optional
 
 import yt_dlp
 
 from downloader.base import BaseDownloader, FileTooLargeError
 from utils.download_manager import DownloadCancelled
 
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 
@@ -77,15 +82,23 @@ class SpotifyDownloader(BaseDownloader):
             'is_explicit': False,
         }
 
-    def get_info(self, url: str) -> dict:
+    def get_info(self, url: str, **kwargs) -> dict:
         match = re.search(r'open\.spotify\.com/track/([A-Za-z0-9]+)', url)
         if not match:
             raise Exception("поддерживаются только ссылки на треки spotify (open.spotify.com/track/...)")
         track_id = match.group(1)
-        try:
-            return self._info_from_embed(track_id)
-        except Exception:
-            return self._info_from_oembed(url, track_id)
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                return self._info_from_embed(track_id)
+            except Exception as e:
+                last_err = e
+                log.warning("spotify embed attempt %d failed: %s", attempt + 1, e)
+                try:
+                    return self._info_from_oembed(url, track_id)
+                except Exception:
+                    continue
+        raise Exception(f"ошибка получения информации spotify: {last_err}")
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -192,9 +205,13 @@ class SpotifyDownloader(BaseDownloader):
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                logging.warning("ffmpeg metadata failed: %s", result.stderr[:200])
             if result.returncode == 0 and tmp_out.exists():
                 audio_path.unlink(missing_ok=True)
                 audio_path = tmp_out
+        except subprocess.TimeoutExpired:
+            logging.warning("ffmpeg metadata timed out")
         except Exception:
             pass
 

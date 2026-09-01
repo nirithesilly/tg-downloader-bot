@@ -1,10 +1,16 @@
+import logging
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 import yt_dlp
 
 from downloader.base import BaseDownloader, FileTooLargeError
 from utils.download_manager import DownloadCancelled
+
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 
 
 class FacebookDownloader(BaseDownloader):
@@ -20,7 +26,7 @@ class FacebookDownloader(BaseDownloader):
         except Exception:
             return clean_url
 
-    def get_info(self, url: str) -> dict:
+    def get_info(self, url: str, **kwargs) -> dict:
         resolved = self.resolve_url(url)
         opts = self.default_opts.copy()
         opts.update(self.impersonate_opts())
@@ -28,17 +34,21 @@ class FacebookDownloader(BaseDownloader):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(resolved, download=False)
-                return {
-                    'title': info.get('title') or 'facebook video',
-                    'uploader': info.get('uploader') or 'unknown',
-                    'duration': info.get('duration', 0),
-                    'id': info.get('id', 'fb_video')
-                }
-        except Exception as e:
-            raise Exception(f"ошибка facebook: {str(e)}")
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(resolved, download=False)
+                    return {
+                        'title': info.get('title') or 'facebook video',
+                        'uploader': info.get('uploader') or 'unknown',
+                        'duration': info.get('duration', 0),
+                        'id': info.get('id', 'fb_video')
+                    }
+            except Exception as e:
+                last_err = e
+                log.warning("facebook get_info attempt %d failed: %s", attempt + 1, e)
+        raise Exception(f"ошибка facebook: {str(last_err)}")
 
     def _video_format(self, quality: str) -> str:
         if quality == "720p":

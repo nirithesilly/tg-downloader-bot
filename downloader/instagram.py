@@ -1,9 +1,15 @@
+import logging
 from pathlib import Path
+from typing import Optional
 
 import yt_dlp
 
 from downloader.base import BaseDownloader, FileTooLargeError
 from utils.download_manager import DownloadCancelled
+
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
 
 
 class InstagramDownloader(BaseDownloader):
@@ -13,31 +19,35 @@ class InstagramDownloader(BaseDownloader):
         self.ydl_opts.update(self.impersonate_opts())
         self.ydl_opts['concurrent_fragments'] = 10
 
-    def get_info(self, url: str) -> dict:
-        try:
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+    def get_info(self, url: str, **kwargs) -> dict:
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
-                content_type = "photo"
-                if info.get('duration', 0) > 0 or info.get('ext') in ['mp4', 'mov', 'avi']:
-                    content_type = "video"
-
-                formats = info.get('formats', [])
-                for f in formats:
-                    if f.get('vcodec') != 'none':
+                    content_type = "photo"
+                    if info.get('duration', 0) > 0 or info.get('ext') in ['mp4', 'mov', 'avi']:
                         content_type = "video"
-                        break
 
-                return {
-                    'title': info.get('title', 'instagram post')[:100],
-                    'uploader': info.get('uploader', 'unknown'),
-                    'description': info.get('description', '')[:200],
-                    'duration': info.get('duration', 0),
-                    'content_type': content_type,
-                    'ext': info.get('ext', 'jpg'),
-                }
-        except Exception as e:
-            raise Exception(f"ошибка получения информации instagram: {str(e)}")
+                    formats = info.get('formats', [])
+                    for f in formats:
+                        if f.get('vcodec') != 'none':
+                            content_type = "video"
+                            break
+
+                    return {
+                        'title': info.get('title', 'instagram post')[:100],
+                        'uploader': info.get('uploader', 'unknown'),
+                        'description': info.get('description', '')[:200],
+                        'duration': info.get('duration', 0),
+                        'content_type': content_type,
+                        'ext': info.get('ext', 'jpg'),
+                    }
+            except Exception as e:
+                last_err = e
+                log.warning("instagram get_info attempt %d failed: %s", attempt + 1, e)
+        raise Exception(f"ошибка получения информации instagram: {str(last_err)}")
 
     def download_video(self, url: str, max_size_mb: int = None, progress_hook=None,
                        cancel_check=None) -> str:
