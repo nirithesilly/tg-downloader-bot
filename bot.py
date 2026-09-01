@@ -29,7 +29,6 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    # Анти-спам middleware (1.5 сек лимит)
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.5))
     dp.callback_query.middleware(ThrottlingMiddleware(limit_seconds=1.5))
 

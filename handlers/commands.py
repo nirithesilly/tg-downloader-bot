@@ -247,7 +247,6 @@ async def send_media_split(callback: types.CallbackQuery, filepath: str, media_t
             pass
 
 
-# --- КОМАНДА /start ---
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     name = esc(message.from_user.first_name.lower() if message.from_user and message.from_user.first_name else "друг")
@@ -269,7 +268,6 @@ async def cmd_start(message: types.Message):
         parse_mode="HTML"
     )
 
-# --- КОМАНДА /help ---
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
@@ -294,7 +292,6 @@ async def cmd_help(message: types.Message):
         parse_mode="HTML"
     )
 
-# --- КОМАНДА /about ---
 @router.message(Command("about"))
 async def cmd_about(message: types.Message):
     await message.answer(
@@ -321,7 +318,6 @@ async def cmd_about(message: types.Message):
         parse_mode="HTML"
     )
 
-# --- ОПРЕДЕЛЕНИЕ СЕРВИСА ---
 def detect_service(url: str) -> str:
     if re.search(r'https?://(?:[a-zA-Z0-9_-]+\.)?(?:youtube\.com|youtu\.be)', url):
         return "youtube"
@@ -336,7 +332,6 @@ def detect_service(url: str) -> str:
     else:
         return "unknown"
 
-# --- YOUTUBE ---
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "youtube")
 async def handle_youtube(message: types.Message):
     url = message.text.strip()
@@ -385,7 +380,6 @@ async def handle_youtube(message: types.Message):
     except Exception as e:
         await message.answer(generic_error("youtube", e), parse_mode="HTML")
 
-# --- TIKTOK ---
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "tiktok")
 async def handle_tiktok(message: types.Message):
     url = message.text.strip()
@@ -416,7 +410,6 @@ async def handle_tiktok(message: types.Message):
     except Exception as e:
         await message.answer(generic_error("tiktok", e), parse_mode="HTML")
 
-# --- INSTAGRAM ---
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "instagram")
 async def handle_instagram(message: types.Message):
     url = message.text.strip()
@@ -457,7 +450,6 @@ async def handle_instagram(message: types.Message):
     except Exception as e:
         await message.answer(generic_error("instagram", e), parse_mode="HTML")
 
-# --- FACEBOOK ---
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "facebook")
 async def handle_facebook(message: types.Message):
     url = message.text.strip()
@@ -490,7 +482,6 @@ async def handle_facebook(message: types.Message):
     except Exception as e:
         await message.answer(generic_error("facebook", e), parse_mode="HTML")
 
-# --- SPOTIFY ---
 @router.message(lambda msg: msg.text and detect_service(msg.text) == "spotify")
 async def handle_spotify(message: types.Message):
     url = message.text.strip()
@@ -553,7 +544,6 @@ async def handle_spotify(message: types.Message):
     except Exception as e:
         await message.answer(generic_error("spotify", e), parse_mode="HTML")
 
-# --- НЕИЗВЕСТНЫЙ СЕРВИС ---
 @router.message(lambda msg: msg.text and msg.text.startswith("http"))
 async def handle_unknown(message: types.Message):
     await message.answer(
@@ -581,7 +571,6 @@ async def handle_too_large(callback: types.CallbackQuery, error: FileTooLargeErr
         pass
 
 
-# --- КОЛБЭКИ YOUTUBE ---
 @router.callback_query(lambda c: c.data.startswith("yt_"))
 async def callback_youtube(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
@@ -632,7 +621,6 @@ async def callback_youtube(callback: types.CallbackQuery):
     except Exception as e:
         await callback.message.edit_text(generic_error("youtube", e), parse_mode="HTML")
 
-# --- КОЛБЭКИ TIKTOK ---
 @router.callback_query(lambda c: c.data.startswith("tt_"))
 async def callback_tiktok(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
@@ -675,7 +663,6 @@ async def callback_tiktok(callback: types.CallbackQuery):
         except Exception as e:
             await callback.message.edit_text(generic_error("tiktok", e), parse_mode="HTML")
 
-# --- КОЛБЭКИ INSTAGRAM ---
 @router.callback_query(lambda c: c.data.startswith("ig_"))
 async def callback_instagram(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
@@ -737,7 +724,6 @@ async def callback_instagram(callback: types.CallbackQuery):
         except Exception as e:
             await callback.message.edit_text(generic_error("instagram", e), parse_mode="HTML")
 
-# --- КОЛБЭКИ FACEBOOK ---
 @router.callback_query(lambda c: c.data.startswith("fb_"))
 async def callback_facebook(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
@@ -788,7 +774,6 @@ async def callback_facebook(callback: types.CallbackQuery):
     except Exception as e:
         await callback.message.edit_text(generic_error("facebook", e), parse_mode="HTML")
 
-# --- КОЛБЭКИ SPOTIFY ---
 @router.callback_query(lambda c: c.data.startswith("sp_"))
 async def callback_spotify(callback: types.CallbackQuery):
     await safe_answer(callback, "начинаю загрузку...")
@@ -815,7 +800,6 @@ async def callback_spotify(callback: types.CallbackQuery):
         except Exception as e:
             await callback.message.edit_text(generic_error("spotify", e), parse_mode="HTML")
 
-# --- ОТМЕНА ЗАГРУЗКИ ---
 @router.callback_query(lambda c: c.data.startswith("cancel:"))
 async def callback_cancel(callback: types.CallbackQuery):
     job_id = callback.data.split(":", 1)[1]
