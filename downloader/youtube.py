@@ -19,7 +19,6 @@ class YouTubeDownloader(BaseDownloader):
         self.ydl_opts['extractor_args'] = {
             'youtube': {
                 'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
             }
         }
 
@@ -27,9 +26,12 @@ class YouTubeDownloader(BaseDownloader):
         last_err: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
             try:
-                with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                opts = self.ydl_opts.copy()
+                opts['extract_flat'] = False
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     return {
+                        'id': info.get('id', ''),
                         'title': info.get('title', 'Unknown'),
                         'duration': info.get('duration', 0),
                         'uploader': info.get('uploader', 'Unknown'),
@@ -57,9 +59,10 @@ class YouTubeDownloader(BaseDownloader):
                        progress_hook=None, cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.ydl_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = self._video_format(quality)
             opts['postprocessors'] = [{
                 'key': 'FFmpegVideoConvertor',
@@ -80,20 +83,22 @@ class YouTubeDownloader(BaseDownloader):
                     )
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
-                return self.safe_find_file(filename, Path(filename).stem)
-        except FileTooLargeError:
+                return self.safe_find_file(filename, stamp)
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
 
     def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None,
                        progress_hook=None, cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.ydl_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'bestaudio/best'
             opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
@@ -115,9 +120,12 @@ class YouTubeDownloader(BaseDownloader):
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
                 base = Path(filename).stem
-                return str(Path(self.download_path) / f"{base}.{format}")
-        except FileTooLargeError:
+                candidate = str(Path(self.download_path) / f"{base}.{format}")
+                return self.safe_find_file(candidate, stamp)
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
+

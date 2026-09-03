@@ -1,11 +1,14 @@
 import asyncio
 import html
 import logging
+import os
 import re
 import time
-from typing import Any, Callable, Optional
+import uuid
+from typing import Any, Callable, Generator, Optional
 
 from aiogram import types
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from config import MAX_DOWNLOAD_SIZE_MB, MAX_FILE_SIZE_MB, PART_SIZE_MB
@@ -13,10 +16,13 @@ from downloader.base import FileTooLargeError
 from utils.download_manager import DownloadCancelled, download_manager
 from utils.files import cleanup_temp_file, get_file_size_mb, merge_instructions, split_file
 
-USER_URL_TTL = 600
-MAX_USER_URLS = 200
+logger = logging.getLogger(__name__)
 
-user_urls: dict[int, dict] = {}
+SESSION_TTL = 3600
+MAX_SESSIONS = 500
+
+url_sessions: dict[str, dict] = {}
+user_to_last_session: dict[int, str] = {}
 
 SERVICE_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("youtube", re.compile(r'https?://(?:[a-zA-Z0-9_-]+\.)?(?:youtube\.com|youtu\.be)')),
@@ -26,31 +32,74 @@ SERVICE_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("spotify", re.compile(r'https?://(?:[a-zA-Z0-9_-]+\.)?(?:open\.spotify\.com/(?:track|album|playlist|episode|show)|spotify\.link)')),
 ]
 
-
-def store_url(user_id: int, url: str, service: str) -> None:
-    if len(user_urls) > MAX_USER_URLS:
-        now = time.time()
-        for uid in [uid for uid, d in user_urls.items()
-                    if now - d.get("ts", 0) > USER_URL_TTL]:
-            user_urls.pop(uid, None)
-    user_urls[user_id] = {"url": url, "service": service, "ts": time.time()}
+URL_REGEX = re.compile(r'(https?://[^\s<>"]+|www\.[^\s<>"]+)')
 
 
-def get_url(user_id: int) -> Optional[dict]:
-    data = user_urls.get(user_id)
-    if not data:
+def extract_url(message: types.Message) -> Optional[str]:
+    text = message.text or message.caption
+    if not text:
         return None
-    if time.time() - data["ts"] > USER_URL_TTL:
-        user_urls.pop(user_id, None)
-        return None
-    return data
+    entities = message.entities or message.caption_entities
+    if entities:
+        for entity in entities:
+            if entity.type == "url":
+                raw = text[entity.offset:entity.offset + entity.length]
+                return raw.rstrip('.,;!?:)]>')
+            elif entity.type == "text_link" and entity.url:
+                return entity.url.rstrip('.,;!?:)]>')
+    match = URL_REGEX.search(text)
+    if match:
+        raw = match.group(1).rstrip('.,;!?:)]>')
+        if raw.startswith("www."):
+            raw = "https://" + raw
+        return raw
+    return None
+
+
+def store_session(url: str, service: str, user_id: int, info: Optional[dict] = None) -> str:
+    now = time.time()
+    if len(url_sessions) > MAX_SESSIONS:
+        expired = [sid for sid, d in url_sessions.items() if now - d.get("ts", 0) > SESSION_TTL]
+        for sid in expired:
+            url_sessions.pop(sid, None)
+    sid = uuid.uuid4().hex[:8]
+    url_sessions[sid] = {
+        "sid": sid,
+        "url": url,
+        "service": service,
+        "user_id": user_id,
+        "info": info or {},
+        "ts": now
+    }
+    user_to_last_session[user_id] = sid
+    return sid
+
+
+def get_session(session_or_user_id: Any) -> Optional[dict]:
+    now = time.time()
+    if isinstance(session_or_user_id, str):
+        data = url_sessions.get(session_or_user_id)
+        if data and now - data["ts"] <= SESSION_TTL:
+            return data
+    if isinstance(session_or_user_id, (int, str)):
+        try:
+            uid = int(session_or_user_id)
+            sid = user_to_last_session.get(uid)
+            if sid:
+                data = url_sessions.get(sid)
+                if data and now - data["ts"] <= SESSION_TTL:
+                    return data
+        except ValueError:
+            pass
+    return None
 
 
 def pop_url(user_id: int) -> Optional[dict]:
-    data = get_url(user_id)
-    if data:
-        user_urls.pop(user_id, None)
-    return data
+    return get_session(user_id)
+
+
+def store_url(user_id: int, url: str, service: str) -> str:
+    return store_session(url, service, user_id)
 
 
 def cancel_kb(job_id: str) -> types.InlineKeyboardMarkup:
@@ -71,7 +120,7 @@ def esc(text: Any) -> str:
 
 
 def log_error(context: str, error: Exception) -> None:
-    logging.error("Ошибка в %s: %s", context, error, exc_info=True)
+    logger.error("Ошибка в %s: %s", context, error, exc_info=True)
 
 
 def generic_error(context: str, error: Exception) -> str:
@@ -88,6 +137,11 @@ def detect_service(url: str) -> str:
         if pattern.search(url):
             return name
     return "unknown"
+
+
+def chunk_list(lst: list, n: int = 10) -> Generator[list, None, None]:
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 
 async def download_with_progress(message: types.Message, func: Callable, *args: Any,
@@ -119,12 +173,14 @@ async def download_with_progress(message: types.Message, func: Callable, *args: 
     )
 
     last_text: Optional[str] = None
+    last_edit_time: float = 0.0
     grace_start: Optional[float] = None
     while not task.done():
         try:
-            await asyncio.wait_for(asyncio.shield(task), 1.5)
+            await asyncio.wait_for(asyncio.shield(task), 3.0)
         except asyncio.TimeoutError:
             pass
+
         if token and token.cancelled:
             if grace_start is None:
                 grace_start = time.monotonic()
@@ -135,11 +191,16 @@ async def download_with_progress(message: types.Message, func: Callable, *args: 
             elif time.monotonic() - grace_start > 10:
                 raise DownloadCancelled()
             continue
+
         text = status['text']
-        if text and text != last_text:
+        now = time.monotonic()
+        if text and text != last_text and (now - last_edit_time >= 3.0):
             last_text = text
+            last_edit_time = now
             try:
                 await message.edit_text(f"{waiting_text}\n<b>{esc(text)}</b>", parse_mode="HTML", reply_markup=kb)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
             except Exception:
                 pass
 
@@ -211,31 +272,58 @@ async def download_and_check(callback: types.CallbackQuery, waiting_text: str,
 
 
 async def send_media(callback: types.CallbackQuery, filepath: str,
-                     media_type: str, caption: str) -> None:
-    file = FSInputFile(filepath)
-    if media_type == "audio":
-        await callback.message.answer_audio(audio=file, caption=caption, parse_mode="HTML")
-    elif media_type == "video":
-        await callback.message.answer_video(video=file, caption=caption, parse_mode="HTML")
-    else:
-        await callback.message.answer_document(document=file, caption=caption, parse_mode="HTML")
-    cleanup_temp_file(filepath)
-    await callback.message.delete()
+                     media_type: str, caption: str,
+                     title: Optional[str] = None,
+                     performer: Optional[str] = None,
+                     duration: Optional[int] = None,
+                     thumbnail: Optional[str] = None,
+                     width: Optional[int] = None,
+                     height: Optional[int] = None) -> None:
+    try:
+        file = FSInputFile(filepath)
+        thumb_file = FSInputFile(thumbnail) if thumbnail and os.path.exists(thumbnail) else None
+        if len(caption) > 1024:
+            caption = caption[:1020] + "..."
+
+        if media_type == "audio":
+            await callback.message.answer_audio(
+                audio=file, caption=caption, parse_mode="HTML",
+                title=title, performer=performer, duration=duration, thumbnail=thumb_file
+            )
+        elif media_type == "video":
+            await callback.message.answer_video(
+                video=file, caption=caption, parse_mode="HTML",
+                duration=duration, width=width, height=height, thumbnail=thumb_file,
+                supports_streaming=True
+            )
+        else:
+            await callback.message.answer_document(document=file, caption=caption, parse_mode="HTML")
+    finally:
+        cleanup_temp_file(filepath)
+        if thumbnail:
+            cleanup_temp_file(thumbnail)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
 
 async def send_media_split(callback: types.CallbackQuery, filepath: str,
-                           media_type: str, caption: str) -> None:
+                           media_type: str, caption: str, **kwargs: Any) -> None:
     size_mb = get_file_size_mb(filepath)
     if size_mb <= MAX_FILE_SIZE_MB:
-        await send_media(callback, filepath, media_type, caption)
+        await send_media(callback, filepath, media_type, caption, **kwargs)
         return
 
     parts = split_file(filepath, PART_SIZE_MB)
     try:
         for i, part in enumerate(parts, 1):
+            part_caption = f"{caption}\nчасть {i}/{len(parts)}" if i == 1 else f"часть {i}/{len(parts)}"
+            if len(part_caption) > 1024:
+                part_caption = part_caption[:1020] + "..."
             await callback.message.answer_document(
                 document=FSInputFile(part),
-                caption=f"{caption}\nчасть {i}/{len(parts)}" if i == 1 else f"часть {i}/{len(parts)}",
+                caption=part_caption,
                 parse_mode="HTML"
             )
             cleanup_temp_file(part)
@@ -244,6 +332,9 @@ async def send_media_split(callback: types.CallbackQuery, filepath: str,
         for part in parts:
             cleanup_temp_file(part)
         cleanup_temp_file(filepath)
+        thumb = kwargs.get('thumbnail')
+        if thumb:
+            cleanup_temp_file(thumb)
         try:
             await callback.message.delete()
         except Exception:
@@ -259,3 +350,4 @@ async def handle_too_large(callback: types.CallbackQuery, error: FileTooLargeErr
         )
     except Exception:
         pass
+

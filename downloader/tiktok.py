@@ -34,19 +34,23 @@ class TikTokDownloader(BaseDownloader):
         raise Exception(f"tikwm api ответ: {res_data.get('msg', 'ошибка')}")
 
     def _download_file(self, file_url: str, output_path: Path, max_size_mb: int = None,
-                       cancel_check=None) -> str:
+                       cancel_check=None, progress_hook=None) -> str:
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
             req = urllib.request.Request(file_url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as resp, open(output_path, 'wb') as out_file:
-                if max_size_mb:
-                    length = resp.headers.get('Content-Length')
-                    if length and int(length) > max_size_mb * 1024 * 1024:
+                total_bytes = 0
+                length = resp.headers.get('Content-Length')
+                if length:
+                    total_bytes = int(length)
+                    if max_size_mb and total_bytes > max_size_mb * 1024 * 1024:
                         raise FileTooLargeError(
-                            f"файл слишком большой: ~{int(length) / 1048576:.1f} мб > лимита {max_size_mb} мб"
+                            f"файл слишком большой: ~{total_bytes / 1048576:.1f} мб > лимита {max_size_mb} мб"
                         )
+                downloaded = 0
+                max_bytes = (max_size_mb * 1024 * 1024) if max_size_mb else None
                 while True:
                     if cancel_check and cancel_check():
                         raise DownloadCancelled()
@@ -54,6 +58,16 @@ class TikTokDownloader(BaseDownloader):
                     if not chunk:
                         break
                     out_file.write(chunk)
+                    downloaded += len(chunk)
+                    if max_bytes and downloaded > max_bytes:
+                        raise FileTooLargeError(
+                            f"файл слишком большой: > {max_size_mb} мб"
+                        )
+                    if progress_hook and total_bytes > 0:
+                        pct = (downloaded / total_bytes) * 100
+                        progress_hook({'status': 'downloading', '_percent_str': f"{pct:.1f}%"})
+            if progress_hook:
+                progress_hook({'status': 'finished'})
             return str(output_path)
         except Exception:
             output_path.unlink(missing_ok=True)
@@ -66,6 +80,7 @@ class TikTokDownloader(BaseDownloader):
             try:
                 tikwm_data = self._fetch_tikwm_info(resolved_url)
                 author = tikwm_data.get('author', {})
+                images = tikwm_data.get('images') or []
                 return {
                     'title': tikwm_data.get('title') or 'tiktok video',
                     'uploader': author.get('nickname') or author.get('unique_id') or 'unknown',
@@ -73,20 +88,26 @@ class TikTokDownloader(BaseDownloader):
                     'description': (tikwm_data.get('title') or '')[:200],
                     'video_url': tikwm_data.get('hdplay') or tikwm_data.get('play'),
                     'audio_url': tikwm_data.get('music'),
+                    'images': images,
+                    'content_type': 'photo' if images else 'video',
                     'id': tikwm_data.get('id', 'tiktok_video')
                 }
             except Exception as e:
                 last_err = e
                 log.warning("tiktok get_info attempt %d failed: %s", attempt + 1, e)
                 try:
-                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                    opts = self.ydl_opts.copy()
+                    opts['extract_flat'] = False
+                    with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(resolved_url, download=False)
                         return {
                             'title': info.get('title', 'tiktok video'),
                             'uploader': info.get('uploader', 'unknown'),
                             'duration': info.get('duration', 0),
                             'description': info.get('description', '')[:200],
-                            'id': info.get('id', 'tiktok_video')
+                            'id': info.get('id', 'tiktok_video'),
+                            'images': [],
+                            'content_type': 'video'
                         }
                 except Exception:
                     continue
@@ -96,18 +117,19 @@ class TikTokDownloader(BaseDownloader):
                        cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             info = self.get_info(url)
             video_direct_url = info.get('video_url')
             video_id = info.get('id', 'video')
 
             if video_direct_url:
-                file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
-                return self._download_file(video_direct_url, file_path, max_size_mb, cancel_check)
+                file_path = Path(self.download_path) / f"tiktok_{video_id}_{stamp}.mp4"
+                return self._download_file(video_direct_url, file_path, max_size_mb, cancel_check, progress_hook)
 
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'best'
             if progress_hook or cancel_check:
                 opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
@@ -122,29 +144,31 @@ class TikTokDownloader(BaseDownloader):
                     )
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
-                return self.safe_find_file(filename, Path(filename).stem)
+                return self.safe_find_file(filename, stamp)
         except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
 
     def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None,
                        progress_hook=None, cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             info = self.get_info(url)
             audio_direct_url = info.get('audio_url')
             video_id = info.get('id', 'audio')
 
             if audio_direct_url:
-                file_path = Path(self.download_path) / f"tiktok_{video_id}_{uuid.uuid4().hex[:8]}.{format}"
-                return self._download_file(audio_direct_url, file_path, max_size_mb, cancel_check)
+                file_path = Path(self.download_path) / f"tiktok_{video_id}_{stamp}.{format}"
+                return self._download_file(audio_direct_url, file_path, max_size_mb, cancel_check, progress_hook)
 
             resolved_url = self.resolve_url(url)
             opts = self.default_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'bestaudio/best'
             opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
@@ -165,9 +189,38 @@ class TikTokDownloader(BaseDownloader):
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
                 base = Path(filename).stem
-                return str(Path(self.download_path) / f"{base}.{format}")
+                candidate = str(Path(self.download_path) / f"{base}.{format}")
+                return self.safe_find_file(candidate, stamp)
         except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
+
+    def download_photos(self, url: str, max_size_mb: int = None,
+                        cancel_check=None) -> list[str]:
+        if cancel_check and cancel_check():
+            raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
+        try:
+            info = self.get_info(url)
+            images = info.get('images') or []
+            if not images:
+                raise Exception("фото в посте tiktok не найдены")
+            video_id = info.get('id', 'photos')
+            paths = []
+            for idx, img_url in enumerate(images, 1):
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled()
+                file_path = Path(self.download_path) / f"tiktok_{video_id}_{stamp}_{idx:02d}.jpg"
+                downloaded = self._download_file(img_url, file_path, max_size_mb, cancel_check)
+                paths.append(downloaded)
+            return paths
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
+            raise
+        except Exception:
+            self.cleanup_stamp(stamp)
+            raise
+

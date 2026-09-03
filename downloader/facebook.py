@@ -64,9 +64,10 @@ class FacebookDownloader(BaseDownloader):
         if cancel_check and cancel_check():
             raise DownloadCancelled()
         resolved = self.resolve_url(url)
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.default_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts.update(self.impersonate_opts())
             opts['http_headers'] = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -92,11 +93,12 @@ class FacebookDownloader(BaseDownloader):
                     )
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
-                return self.safe_find_file(filename, info.get('id', ''))
-        except FileTooLargeError:
+                return self.safe_find_file(filename, stamp)
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
 
     def download_audio(self, url: str, format: str = "mp3", max_size_mb: int = None,
@@ -104,9 +106,10 @@ class FacebookDownloader(BaseDownloader):
         if cancel_check and cancel_check():
             raise DownloadCancelled()
         resolved = self.resolve_url(url)
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.default_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts.update(self.impersonate_opts())
             opts['http_headers'] = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -133,9 +136,12 @@ class FacebookDownloader(BaseDownloader):
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
                 base = Path(filename).stem
-                return str(Path(self.download_path) / f"{base}.{format}")
-        except FileTooLargeError:
+                candidate = str(Path(self.download_path) / f"{base}.{format}")
+                return self.safe_find_file(candidate, stamp)
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
+

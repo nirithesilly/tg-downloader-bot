@@ -9,22 +9,24 @@ from handlers.utils import (
     detect_service,
     download_and_check,
     esc,
+    extract_url,
     generic_error,
+    get_session,
     handle_too_large,
-    pop_url,
     safe_answer,
     send_media_split,
-    store_url,
+    store_session,
 )
 
 router = Router()
 yt_downloader = YouTubeDownloader()
 
 
-@router.message(lambda msg: msg.text and detect_service(msg.text) == "youtube")
+@router.message(lambda msg: (extract_url(msg) and detect_service(extract_url(msg)) == "youtube"))
 async def handle_youtube(message: types.Message) -> None:
-    url = message.text.strip()
-    store_url(message.from_user.id, url, "youtube")
+    url = extract_url(message)
+    if not url:
+        return
 
     try:
         loop = asyncio.get_running_loop()
@@ -40,6 +42,8 @@ async def handle_youtube(message: types.Message) -> None:
                 parse_mode="HTML"
             )
             return
+
+        sid = store_session(url, "youtube", message.from_user.id, info)
 
         duration = info.get('duration') or 0
         duration_min = duration // 60
@@ -57,12 +61,12 @@ async def handle_youtube(message: types.Message) -> None:
             parse_mode="HTML",
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    types.InlineKeyboardButton(text="видео", callback_data="yt_video"),
-                    types.InlineKeyboardButton(text="аудио", callback_data="yt_audio")
+                    types.InlineKeyboardButton(text="видео (best)", callback_data=f"yt_video:{sid}"),
+                    types.InlineKeyboardButton(text="аудио (mp3)", callback_data=f"yt_audio:{sid}")
                 ],
                 [
-                    types.InlineKeyboardButton(text="720p", callback_data="yt_video_720"),
-                    types.InlineKeyboardButton(text="480p", callback_data="yt_video_480")
+                    types.InlineKeyboardButton(text="720p", callback_data=f"yt_video_720:{sid}"),
+                    types.InlineKeyboardButton(text="480p", callback_data=f"yt_video_480:{sid}")
                 ]
             ])
         )
@@ -74,13 +78,20 @@ async def handle_youtube(message: types.Message) -> None:
 async def callback_youtube(callback: types.CallbackQuery) -> None:
     await safe_answer(callback, "начинаю загрузку...")
 
-    data = pop_url(callback.from_user.id)
+    parts = callback.data.split(":", 1)
+    action = parts[0]
+    sid = parts[1] if len(parts) > 1 else callback.from_user.id
+
+    data = get_session(sid)
     if not data or data.get("service") != "youtube":
         await callback.message.edit_text("ссылка не найдена или устарела. отправьте ссылку заново.")
         return
 
     url = data["url"]
-    action = callback.data
+    info = data.get("info") or {}
+    title = info.get("title") or "YouTube Audio"
+    uploader = info.get("uploader") or "YouTube"
+    duration = info.get("duration")
 
     if action == "yt_audio":
         try:
@@ -91,7 +102,11 @@ async def callback_youtube(callback: types.CallbackQuery) -> None:
             )
             if cancelled:
                 return
-            await send_media_split(callback, filepath, "audio", "<b>аудио из youtube скачано.</b>")
+            caption = f"<b>{esc(title)}</b>\n{esc(uploader)}"
+            await send_media_split(
+                callback, filepath, "audio", caption,
+                title=title, performer=uploader, duration=duration
+            )
         except FileTooLargeError as e:
             await handle_too_large(callback, e)
         except Exception as e:
@@ -114,8 +129,13 @@ async def callback_youtube(callback: types.CallbackQuery) -> None:
         )
         if cancelled:
             return
-        await send_media_split(callback, filepath, "video", "<b>видео из youtube скачано.</b>")
+        caption = f"<b>{esc(title)}</b>\n{esc(uploader)}"
+        await send_media_split(
+            callback, filepath, "video", caption,
+            duration=duration
+        )
     except FileTooLargeError as e:
         await handle_too_large(callback, e)
     except Exception as e:
         await callback.message.edit_text(generic_error("youtube", e), parse_mode="HTML")
+

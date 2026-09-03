@@ -53,9 +53,10 @@ class InstagramDownloader(BaseDownloader):
                        cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.ydl_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'best[ext=mp4]/best'
             if progress_hook or cancel_check:
                 opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
@@ -71,20 +72,22 @@ class InstagramDownloader(BaseDownloader):
                     )
                 ydl.process_ie_result(info, download=True)
                 filename = ydl.prepare_filename(info)
-                return self.safe_find_file(filename, Path(filename).stem)
-        except FileTooLargeError:
+                return self.safe_find_file(filename, stamp)
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
 
     def download_photo(self, url: str, max_size_mb: int = None, progress_hook=None,
                        cancel_check=None):
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             opts = self.ydl_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'best[ext=jpg]/best[ext=png]/best'
             if progress_hook or cancel_check:
                 opts['progress_hooks'] = [self._make_progress_hook(progress_hook, cancel_check)]
@@ -96,15 +99,17 @@ class InstagramDownloader(BaseDownloader):
                     filenames = []
                     for entry in entries:
                         filename = ydl.prepare_filename(entry)
-                        path = self.safe_find_file(filename, Path(filename).stem)
-                        if Path(path).exists():
+                        path = self.safe_find_file(filename, stamp)
+                        if Path(path).exists() and path not in filenames:
                             filenames.append(path)
                     if filenames:
                         return filenames
                 filename = ydl.prepare_filename(info)
-                return self.safe_find_file(filename, Path(filename).stem)
+                return self.safe_find_file(filename, stamp)
         except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
+

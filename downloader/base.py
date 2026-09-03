@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from config import DOWNLOAD_PATH
+from config import COOKIES_FILE, DOWNLOAD_PATH, HTTP_PROXY
 from utils.download_manager import DownloadCancelled
 
 try:
@@ -24,7 +24,6 @@ class BaseDownloader:
     def __init__(self):
         self.download_path = DOWNLOAD_PATH
         os.makedirs(self.download_path, exist_ok=True)
-        self._stamp: Optional[str] = None
         self._info_cache: dict[str, tuple[float, dict]] = {}
         self.default_opts: dict = {
             'quiet': True,
@@ -34,20 +33,30 @@ class BaseDownloader:
             'fragment_retries': 10,
             'skip_unavailable_fragments': True,
         }
+        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+            self.default_opts['cookiefile'] = COOKIES_FILE
+        if HTTP_PROXY:
+            self.default_opts['proxy'] = HTTP_PROXY
 
-    def make_outtmpl(self) -> str:
-        self._stamp = uuid.uuid4().hex[:8]
-        return f'{self.download_path}/%(title).50s_%(id)s_{self._stamp}.%(ext)s'
+    def make_outtmpl(self, stamp: Optional[str] = None) -> tuple[str, str]:
+        actual_stamp = stamp or uuid.uuid4().hex[:8]
+        outtmpl = f'{self.download_path}/%(title).50s_%(id)s_{actual_stamp}.%(ext)s'
+        return outtmpl, actual_stamp
 
-    def cleanup_partial(self) -> None:
-        stamp = getattr(self, '_stamp', None)
+    def cleanup_stamp(self, stamp: Optional[str]) -> None:
         if not stamp:
             return
         try:
             for f in Path(self.download_path).glob(f"*{stamp}*"):
-                f.unlink(missing_ok=True)
+                if f.is_file():
+                    f.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def cleanup_partial(self, stamp: Optional[str] = None) -> None:
+        actual_stamp = stamp or getattr(self, '_stamp', None)
+        if actual_stamp:
+            self.cleanup_stamp(actual_stamp)
 
     def _make_progress_hook(self, progress_hook: Optional[callable] = None,
                             cancel_check: Optional[callable] = None) -> callable:
@@ -106,9 +115,12 @@ class BaseDownloader:
     def safe_find_file(self, filename: str, stem: str) -> str:
         if Path(filename).exists():
             return filename
-        for f in Path(self.download_path).glob(f"*{stem}*"):
-            return str(f)
+        if stem:
+            for f in Path(self.download_path).glob(f"*{stem}*"):
+                if f.is_file():
+                    return str(f)
         return filename
+
 
     def get_info_cached(self, url: str, max_age: int = 300, **kwargs) -> dict:
         now = time.time()

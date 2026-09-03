@@ -19,5 +19,9 @@ MAX_DOWNLOAD_SIZE_MB = 1000
 DOWNLOAD_PATH = str(BASE_DIR / "downloads")
 LOG_DIR = str(BASE_DIR / "logs")
 
+COOKIES_FILE = os.getenv("COOKIES_FILE", str(BASE_DIR / "cookies.txt"))
+HTTP_PROXY = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+

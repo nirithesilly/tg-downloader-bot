@@ -3,6 +3,8 @@ import logging
 import logging.handlers
 import sys
 
+import shutil
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -34,11 +36,14 @@ async def periodic_cleanup():
 
 
 async def main():
+    if not shutil.which("ffmpeg"):
+        logging.warning("ВНИМАНИЕ: ffmpeg не найден в системе! Конвертация аудио и склейка видео не будут работать без установленного ffmpeg.")
+
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
     dp.message.middleware(ThrottlingMiddleware(limit_seconds=1.5))
-    dp.callback_query.middleware(ThrottlingMiddleware(limit_seconds=1.5))
+    dp.callback_query.middleware(ThrottlingMiddleware(limit_seconds=0.3))
 
     dp.include_router(commands.router)
     dp.include_router(messages.router)
@@ -50,3 +55,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

@@ -8,7 +8,7 @@ from handlers.instagram import router as instagram_router
 from handlers.spotify import router as spotify_router
 from handlers.tiktok import router as tiktok_router
 from handlers.youtube import router as youtube_router
-from handlers.utils import detect_service, esc, safe_answer
+from handlers.utils import detect_service, esc, extract_url, safe_answer
 from utils.download_manager import download_manager
 
 router = Router()
@@ -93,8 +93,9 @@ async def cmd_about(message: types.Message) -> None:
     )
 
 
-@router.message(lambda msg: msg.text and msg.text.startswith("http") and detect_service(msg.text) == "unknown")
+@router.message(lambda msg: (extract_url(msg) is not None and detect_service(extract_url(msg)) == "unknown"))
 async def handle_unknown(message: types.Message) -> None:
+
     await message.answer(
         "<b>ссылка получена.</b>\n\n"
         "но этот сервис пока не поддерживается.\n"

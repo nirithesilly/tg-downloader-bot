@@ -139,16 +139,15 @@ class SpotifyDownloader(BaseDownloader):
         best_entry = None
         best_score = 0.0
 
-        with yt_dlp.YoutubeDL({
-            'quiet': True,
-            'no_warnings': True,
+        opts = self.default_opts.copy()
+        opts.update({
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android', 'web'],
-                    'skip': ['hls', 'dash'],
                 }
             }
-        }) as ydl:
+        })
+        with yt_dlp.YoutubeDL(opts) as ydl:
             for query in queries:
                 if cancel_check and cancel_check():
                     raise DownloadCancelled()
@@ -223,17 +222,17 @@ class SpotifyDownloader(BaseDownloader):
                        progress_hook=None, cancel_check=None) -> str:
         if cancel_check and cancel_check():
             raise DownloadCancelled()
+        outtmpl, stamp = self.make_outtmpl()
         try:
             info = self.get_info(url)
             entry = self._search_track(info, cancel_check)
 
             opts = self.default_opts.copy()
-            opts['outtmpl'] = self.make_outtmpl()
+            opts['outtmpl'] = outtmpl
             opts['format'] = 'bestaudio/best'
             opts['extractor_args'] = {
                 'youtube': {
                     'player_client': ['android', 'web'],
-                    'skip': ['hls', 'dash'],
                 }
             }
             opts['postprocessors'] = [{
@@ -252,15 +251,17 @@ class SpotifyDownloader(BaseDownloader):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.process_ie_result(entry, download=True)
                 filename = ydl.prepare_filename(entry)
-                audio_path = Path(self.download_path) / f"{Path(filename).stem}.{format}"
+                base = Path(filename).stem
+                candidate = str(Path(self.download_path) / f"{base}.{format}")
+                audio_path = Path(self.safe_find_file(candidate, stamp))
 
             if cancel_check and cancel_check():
                 raise DownloadCancelled()
             return self._apply_metadata_and_cover(audio_path, info)
-        except FileTooLargeError:
-            raise
-        except DownloadCancelled:
+        except (FileTooLargeError, DownloadCancelled):
+            self.cleanup_stamp(stamp)
             raise
         except Exception:
-            self.cleanup_partial()
+            self.cleanup_stamp(stamp)
             raise
+

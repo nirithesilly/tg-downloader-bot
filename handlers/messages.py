@@ -1,10 +1,13 @@
 from aiogram import Router, types
 
+from handlers.utils import extract_url
+
 router = Router()
 
 
-@router.message(lambda msg: msg.text and not msg.text.startswith(("http://", "https://")))
+@router.message(lambda msg: extract_url(msg) is None)
 async def handle_plain_text(message: types.Message):
+
     await message.answer(
         "это не ссылка.\n\n"
         "отправь мне ссылку на видео или трек из:\n"
